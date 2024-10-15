@@ -1,0 +1,14 @@
+streamlit
+pandas
+geopandas
+h3
+duckdb
+ibis-framework[duckdb,geospatial,pandas]
+boto3
+geocoder
+plotly
+
+#for regs
+pingouin
+Rtree
+statsmodels
