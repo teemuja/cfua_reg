@@ -1,9 +1,8 @@
 streamlit
 pandas
 geopandas
-h3
+h3pandas
 duckdb
-ibis-framework[duckdb,geospatial,pandas]
 boto3
 geocoder
 plotly
