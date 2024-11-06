@@ -183,7 +183,6 @@ retail_categories = {
     }
 
 
-@st.fragment()
 def aggregation(df):
     #bin age
     def binit(df_in,bins = [0, 25, 50, 100]):
