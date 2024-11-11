@@ -54,6 +54,7 @@ if not auth:
 with st.status('Connecting database..') as dbstatus:
     st.caption(f'Duckdb v{duckdb.__version__}')
     s3_url = f"{st.secrets['allas']['allas_url']}/CFUA/RD/cfua_data_with_landuse_nordics_cf_N1827.parquet"
+    
     @st.cache_data()
     def load_db(s3_url):
         duckdb.sql("INSTALL httpfs;")
@@ -195,7 +196,7 @@ with st.container():
     with st.form('reg'):
         cities = cfua_data['fua_name'].unique().tolist()
         s1,s2,s3 = st.columns(3)
-        target_cities = s1.multiselect("Target Cities",cities)
+        target_cities = s1.multiselect("Target Cities",cities,default="Helsinki")
         target_col = s2.selectbox("Target domain",cf_cols)
         cat_cols = ['Household per capita income decile', 'Household type'] #,'Urban degree']
         control_cols = s3.multiselect('Control cols',cat_cols,default='Household per capita income decile')
@@ -205,7 +206,7 @@ with st.container():
         gen = st.form_submit_button('Generate')
     
     my_reg_results = None
-    if gen:
+    if gen and len(target_cities) > 0:
         cfua_data_for_city = cfua_data[cfua_data['fua_name'].isin(target_cities)]
         
         #agg here only for the city df
