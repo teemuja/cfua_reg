@@ -1,8 +1,11 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
 import h3
 import h3.api.basic_int as h3_api
 import ast
+import re
+import duckdb
 
 #ols regression
 import pingouin as pg
@@ -11,19 +14,20 @@ import statsmodels.formula.api as smf
 
 def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols):
     df = df_in.copy()
-    
+
     def ols(df, cf_col, base_cols, cat_cols, ext_cols, control_cols):
         cat_cols_lower = [col.lower().replace(' ', '_') for col in cat_cols]
         
         def format_col(col):
             col_lower = col.lower().replace(' ', '_')
             return f'C({col_lower})' if col_lower in cat_cols_lower else col_lower
-            
+        
         domain_col = cf_col.lower().replace(' ', '_')
         df.columns = df.columns.str.lower().str.replace(' ', '_')
         
         base_cols_str = ' + '.join([format_col(col) for col in base_cols])
-        ext_cols_str = ' + '.join([col.lower().replace(' ', '_') for col in ext_cols])
+        ext_cols_str = ' + '.join([format_col(col) for col in ext_cols])
+        
         if control_cols is not None:
             control_cols_str = ' + '.join([format_col(col) for col in control_cols])
             base_formula = f'{domain_col} ~ {base_cols_str} + {control_cols_str}'
@@ -32,11 +36,15 @@ def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols):
             base_formula = f'{domain_col} ~ {base_cols_str}'
             ext_formula = f'{domain_col} ~ {base_cols_str} + {ext_cols_str}'
         
+        # Remove extra spaces for column selection
+        formula_vars = re.split(r'\s*\+\s*', ext_formula.split('~')[1].strip())
+        formula_vars = [col.strip() for col in formula_vars]
+        
         base_model = smf.ols(formula=base_formula, data=df)
         base_results = base_model.fit()
         ext_model = smf.ols(formula=ext_formula, data=df)
         ext_results = ext_model.fit()
-        
+
         return base_results, ext_results
     
     base_results, ext_results = ols(df, cf_col, base_cols, cat_cols, ext_cols, control_cols)
@@ -46,7 +54,8 @@ def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols):
         'base_p': round(base_results.pvalues, rounder),
         'ext_r': round(ext_results.params, rounder),
         'ext_p': round(ext_results.pvalues, rounder)
-    })
+        })
+    
     return reg_results
 
 def partial_corr(df,cf_cols,corr_target,covar='Income level decile'):
@@ -64,7 +73,8 @@ def partial_corr(df,cf_cols,corr_target,covar='Income level decile'):
 
 # ------- services aggregation and sdi classification --------
 
-def classify_service_diversity(df, service_col='services', categories_dict=None):
+def classify_service_diversity(df_in, service_col='services', categories_dict=None):
+    
     def parse_and_categorize(service_str):
         # Parse service string to dictionary
         if pd.isna(service_str) or service_str == 'nan':
@@ -104,16 +114,16 @@ def classify_service_diversity(df, service_col='services', categories_dict=None)
         return round(-np.sum(proportions * np.log(proportions)), 1)
     
     # Create a copy of the DataFrame
-    df_copy = df.copy()
+    df = df_in.copy()
     
     # Calculate SDI for each row
     sdis = []
-    for service_str in df_copy[service_col]:
+    for service_str in df[service_col]:
         categorized = parse_and_categorize(service_str)
         sdi = calculate_sdi(categorized)
         sdis.append(sdi)
     
-    df_copy['service_sdi'] = sdis
+    df['service_sdi'] = sdis
     
     def assign_activity_class(series):
         # Calculate quartiles for non-zero SDI values
@@ -144,21 +154,28 @@ def classify_service_diversity(df, service_col='services', categories_dict=None)
         return series.apply(classify)
     
     # Apply the activity classification
-    df_copy['activity_class'] = assign_activity_class(df_copy['service_sdi']).fillna(0)
+    df['activity_class'] = assign_activity_class(df['service_sdi']).fillna(0)
     
-    return df_copy
+    return df
 
 
-def count_landuse_types_in_nd(df_in, k, lu_dict):
-    df = df_in.copy()
+def count_landuse_types_in_nd(df_in, r, lu_dict):
+    df = df_in.copy().set_index('h3_10')
+    
     # extract cf records (those hexes which have footprint values)
     cf_points = df[df['Total footprint'] != 0]
     hex_list = cf_points.index.tolist()
     
-    # Convert hex ids from strings to H3 integers and generate the k-ring neighborhoods
-    #neighborhoods_as_h3ids = {hex_str: h3_api.k_ring(h3_api.string_to_h3(hex_str), k) for hex_str in hex_list}
+    #convert r to k (hex rings)
+    nd_size_dict = {1:7,3:20,5:33,7:47,9:60}
+    k = nd_size_dict[r]
+    
+    # gen nd df in distance k
     neighborhoods_as_h3ids = {hex_str: h3.grid_disk(hex_str, k) for hex_str in hex_list}
 
+    #init col for "malls"
+    df[f"lu_malls"] = 0
+    
     # Loop through each hexagon's neighborhood
     for hex_str, hex_ring in neighborhoods_as_h3ids.items():
         # Filter the dataframe for hexagons in the neighborhood
@@ -178,26 +195,14 @@ def count_landuse_types_in_nd(df_in, k, lu_dict):
                 df[f"lu_{landuse_class}"] = 0
                 df.at[hex_str, f'lu_{landuse_class}'] = count
         
-        #count "malls" (activity class 3 or 4 = high sdi) accordingly..
+        # count "malls" (activity class 3 or 4 = high sdi) in the neighborhood
         if 'activity_class' in nd_df.columns:
-            mall_count = nd_df[nd_df['activity_class'] > 2].shape[0]
-            df[f"lu_malls"] = 0
-            df.at[hex_str, 'lu_malls'] = int(mall_count)
+            mall_count = len(nd_df[nd_df['activity_class'] > 2])
+            df.at[hex_str, 'lu_malls'] = mall_count  # Update only for the specific hexagon
             
     lu_columns = [col for col in df.columns if col.startswith('lu_')]
     for col in lu_columns:
         if col not in df.columns:
             df[col] = 0
-    
-    #normalize values
-    def normalize_df(df,cols=None):
-        if cols is None:
-            cols = df.columns.tolist()
-        for col in cols:
-            df[col] = round(df[col] / df[col].abs().max(),1)
-        return df
-    
-    out_df = normalize_df(df,cols=lu_columns)
-    
-    return out_df 
 
+    return df

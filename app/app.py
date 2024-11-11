@@ -53,74 +53,51 @@ if not auth:
 
 with st.status('Connecting database..') as dbstatus:
     st.caption(f'Duckdb v{duckdb.__version__}')
-    s3_url = f"{st.secrets['allas']['allas_url']}/CFUA/RD/cfua_data_nordics.parquet"
+    s3_url = f"{st.secrets['allas']['allas_url']}/CFUA/RD/cfua_data_with_landuse_nordics_cf_N1827.parquet"
     @st.cache_data()
     def load_db(s3_url):
         duckdb.sql("INSTALL httpfs;")
         duckdb.sql("LOAD httpfs;")
-        column_name = 'fua_name'
-        fua_names_query = f"SELECT DISTINCT {column_name} FROM read_parquet('{s3_url}');"
-        fuas = duckdb.query(fua_names_query).to_df()[column_name].tolist()
-        return fuas
-    fuas = load_db(s3_url)
+        #column_name = 'fua_name'
+        #fua_names_query = f"SELECT DISTINCT {column_name} FROM read_parquet('{s3_url}');"
+        all_query = f"SELECT * FROM read_parquet('{s3_url}');"
+        #fuas = duckdb.query(all_query).to_df()[column_name].tolist()
+        cfua = duckdb.query(all_query).to_df()
+        return cfua #fuas
+    
+    cfua_data = load_db(s3_url).drop(columns=['__index_level_0__','lat','lng'])
+    total_n = len(cfua_data[cfua_data['Total footprint'] != 0])
+    st.info(f"Nordic CF data N{total_n}. Memory usage {round(cfua_data.memory_usage(deep=True).sum() / (1024**2),1)} MB")
+    s1,s2 =st.columns(2)
+    s1.data_editor(cfua_data)
+    s2.text(cfua_data.dtypes)
+    #st.text(cfua_data.isna().sum())
     dbstatus.update(label="DB connected!", state="complete", expanded=False)
 
-s1,s2 =st.columns(2)
-selected_fua = [s1.selectbox("Select case area", fuas)] #take [] away if using multiselect
-df = None
-getit = st.button("Fetch CFUA data")
-if getit:
-    if selected_fua:
-        @st.cache_data()
-        def get_cfua_data(selected_fuas,column='fua_name'):
-            if len(selected_fuas) > 1:
-                # Convert list of selected values into a SQL IN clause format
-                values_str = ', '.join(f"'{v}'" for v in selected_fuas)
-                filter_query = f"""
-                SELECT * 
-                FROM read_parquet('{s3_url}') 
-                WHERE {column} IN ({values_str})
-                """
-            else:
-                value_str = f"'{selected_fuas[0]}'"
-                filter_query = f"""
-                SELECT * 
-                FROM read_parquet('{s3_url}') 
-                WHERE {column} = {value_str}
-                """
-                
-            df = duckdb.query(filter_query).to_df()
-            cols = df.columns.to_list()[:-2]
-            return df[cols]
-        df = get_cfua_data(selected_fuas=selected_fua)
-        df = df.dropna(subset="h3_10").set_index("h3_10")
-        #st.data_editor(df)
-        #st.stop()
-    else:
-        st.warning('Not enough memory..')
-        st.stop()
 
-if df is None:
-    st.stop()
-    
-# now we need to aggregate and classify the cfua_data
-# to get landuse features of neighborhoods in different sizes for each record
 
 #dict for custom naming the landuse values used as a integers in cfua__data
+
 lu_dict = {
         0:"other",
-        1:"dense", #"Discontinuous dense urban fabric (S.L. : 50% -  80%)": 1,
-        2:"compact", #"Discontinuous medium density urban fabric (S.L. : 30% - 50%)": 2,
-        3:"continuous", #"Continuous urban fabric (S.L. : > 80%)": 3,
-        4:"sprawled",#"Discontinuous very low density urban fabric (S.L. : < 10%)": 4,
-        5:"facilities", #"Industrial, commercial, public, military and private units": 5,
-        6:"leisure_sport", #"Sports and leisure facilities": 6,
-        7:"green_area", #"Green urban areas": 7,
-        8:"forest", #"Forests": 8,
-        9:"open_nature"
-        # combine following classes under '9'..
-        #"Open spaces with little or no vegetation (beaches, dunes, bare rocks, glaciers)": 9,
-        #"Herbaceous vegetation associations (natural grassland, moors...)": 9
+        
+        # city classes
+        3:"compact", #"Continuous urban fabric (S.L. : > 80%)": 3,
+        
+        1:"fragments_dense", #"Discontinuous dense urban fabric (S.L. : 50% -  80%)": 1,
+        2:"fragments_airy", #"Discontinuous medium density urban fabric (S.L. : 30% - 50%)": 2,
+        
+        4:"sprawled", #"Discontinuous low density urban fabric (S.L. : 10% - 30%)": 4
+        5:"sprawled",#"Discontinuous very low density urban fabric (S.L. : < 10%)": 5,
+        
+        6:"facilities", #"Industrial, commercial, public, military and private units": 6,
+        7:"leisure_sport", #"Sports and leisure facilities": 7,
+        8:"green_area", #"Green urban areas": 8,
+        9:"forest", #"Forests": 9,
+        10:"open_nature"
+        # combine following classes under '10'..
+        #"Open spaces with little or no vegetation (beaches, dunes, bare rocks, glaciers)": 10,
+        #"Herbaceous vegetation associations (natural grassland, moors...)": 10
         }
 
 #categories for services
@@ -182,38 +159,16 @@ retail_categories = {
         "Other": set()  # This will catch any uncategorized amenities
     }
 
-
-def aggregation(df):
-    #bin age
-    def binit(df_in,bins = [0, 25, 50, 100]):
-        df = df_in.copy()
-        bins = [0, 25, 50, np.inf]
-        names = ["young", "adult", "senior"]
-        df['Age'] = pd.cut(df['Age'], bins, labels=names)
-        return df
-    df = binit(df)
-    with st.status('Aggregating landuse and services..') as aggstatus:
-        #we first classify service sdi in 'activity_class' column for all hexas in the df
-        df_v2 = regs.classify_service_diversity(df, service_col='services', categories_dict=retail_categories)
-        nd_size_km = st.slider("set radius for the neighborhood to use (km)",1,9,1,step=2)
-        nd_size_dict = {1:7,3:20,5:33,7:47,9:60}
-        nd_size_r = nd_size_dict[nd_size_km]
-        #then we count hexas with different landuse types in the nd of the size set above
-        df_for_reg = regs.count_landuse_types_in_nd(df_in=df_v2, k=nd_size_r, lu_dict=lu_dict)
-        #st.data_editor(df)
-        #st.data_editor(df_v2)
-        #st.data_editor(df_for_reg)
-        #st.stop()
-        del df
-        del df_v2
-        st.data_editor(df_for_reg.describe())
-        st.info(f"Memory usage of the data {round(df_for_reg.memory_usage(deep=True).sum() / (1024**2),1)} MB")
-        aggstatus.update(label="Aggregation ready!", state="complete", expanded=False)
+@st.cache_data(max_entries=1) #@st.fragment()
+def aggregation(df,nd_size_km,retail_categories,lu_dict):
+    #we first classify service sdi in 'activity_class' column for all hexas in the df
+    df_v2 = regs.classify_service_diversity(df, service_col='services', categories_dict=retail_categories)
+    #..count hexas with different landuse types in the nd of the size set above
+    df_for_reg = regs.count_landuse_types_in_nd(df_in=df_v2, r=nd_size_km, lu_dict=lu_dict)
     return df_for_reg
 
-df_for_reg = aggregation(df)
 
-with st.expander('Regression',expanded=True):
+with st.container():
     #cols
     cf_cols = [
         'Total footprint',
@@ -226,35 +181,99 @@ with st.expander('Regression',expanded=True):
         'Summer house footprint',
         'Diet footprint',
         ]
-    lu_cols = [
-            'lu_malls',
-            'lu_continuous',
-            'lu_facilities',
-            'lu_dense',
-            'lu_green_area',
-            'lu_leisure_sport',
-            'lu_compact',
-            'lu_open_nature',
-            'lu_forest']
+    lu_cols = ['lu_malls',
+                'lu_fragments_dense',
+                'lu_compact',
+                'lu_green_area',
+                'lu_leisure_sport',
+                'lu_fragments_airy',
+                'lu_facilities',
+                'lu_forest',
+                'lu_sprawled',
+                'lu_open_nature'
+              ]
+    with st.form('reg'):
+        cities = cfua_data['fua_name'].unique().tolist()
+        s1,s2,s3 = st.columns(3)
+        target_cities = s1.multiselect("Target Cities",cities)
+        target_col = s2.selectbox("Target domain",cf_cols)
+        cat_cols = ['Household per capita income decile', 'Household type'] #,'Urban degree']
+        control_cols = s3.multiselect('Control cols',cat_cols,default='Household per capita income decile')
+        nd_size_km = st.slider("set radius for the neighborhood to use (km)",1,9,3,step=2)
+        base_cols = ['Household type','Age']
+        ext_cols = lu_cols
+        gen = st.form_submit_button('Generate')
     
-    
-    @st.fragment()
-    def generate_regs(df_for_reg):
-        with st.form('reg'):
-            s1,s2,s3 = st.columns(3)
-            target_col=s1.selectbox("Target domain",cf_cols)
-            cat_cols = ['Age','Education level', 'Household per capita income decile', 'Household type']#,'Urban degree']
-            control_cols = s2.multiselect('Control cols',cat_cols,default='Household per capita income decile')
-            base_cols = ['Age','Education level','Household type']
-            ext_cols = lu_cols
-            gen = st.form_submit_button('Generate')
-            
-        if gen:
-            reg_df = regs.ols_reg_table(df_for_reg,target_col,base_cols,cat_cols,ext_cols,control_cols).fillna('-')
-            #st.text(f"cat_cols: {cat_cols}")
-            #st.text(f"base_cols: {base_cols}")
-            #st.text(f"ext_cols: {ext_cols}")
-            st.data_editor(reg_df,use_container_width=True, height=700)
+    my_reg_results = None
+    if gen:
+        cfua_data_for_city = cfua_data[cfua_data['fua_name'].isin(target_cities)]
+        
+        #agg here only for the city df
+        with st.status('Aggregating landuse and services..') as aggstatus:
+            df_for_reg = aggregation(cfua_data_for_city,nd_size_km,retail_categories,lu_dict)
+            st.data_editor(df_for_reg.describe(),height=200)
+            st.info(f"Memory usage of the data {round(df_for_reg.memory_usage(deep=True).sum() / (1024**2),1)} MB")
+            aggstatus.update(label="Aggregation ready!", state="complete", expanded=False)
+        
+        dropcols = ['fua_name','services']
+        df_for_reg_cleaned = df_for_reg[df_for_reg['Total footprint'] != 0].drop(columns=dropcols)
+        st.subheader(f"**Regression table**")
+        st.caption(f"{target_cities} with N{len(df_for_reg_cleaned)}")
+        
+        #normalize for reg
+        def normalize_df(df_in,cols=None):
+            df = df_in.copy()
+            if cols is None:
+                cols = df.select_dtypes(include=np.number).columns.tolist()
+            for col in cols:
+                df[col] = df[col] / df[col].abs().max()
+            return df
+        
+        df_for_reg_normalized = normalize_df(df_for_reg_cleaned)
+        
+        #st.data_editor(df_for_reg_cleaned)
+        #st.markdown("normalized...")
+        #st.data_editor(df_for_reg_normalized)
+        #st.stop()
+        my_reg_results = regs.ols_reg_table(df_for_reg_normalized,target_col,base_cols,cat_cols,ext_cols,control_cols)
+        st.data_editor(my_reg_results,use_container_width=True, height=900)
 
-    generate_regs(df_for_reg=df_for_reg)
-    
+if my_reg_results is not None:
+    def gen_merged(index_name='index'):
+        dfs = []
+        my_bar = st.progress(0, text="generating research data..")
+        for r in [1,3,5,9]:
+            dfr = aggregation(cfua_data_for_city,r,retail_categories,lu_dict)
+            reg_r = regs.ols_reg_table(dfr,target_col,base_cols,cat_cols,ext_cols,control_cols)
+            dfs.append(reg_r)
+            my_bar.progress(r*10)
+
+        cols = pd.MultiIndex.from_product([[df.columns[0] for df in dfs], df.columns[1:]], names=[index_name, ''])
+        merged = pd.DataFrame(index=range(len(dfs[0])), columns=cols, dtype=float)
+        for i, df in enumerate(dfs):
+            for col in df.columns[1:]:
+                merged[(df.columns[0], col)][i] = df[col]
+        my_bar.progress(100)
+        my_bar.empty()
+        return merged
+
+    cities = ""
+    for c in target_cities:
+        cities += c
+    csv_to_save = my_reg_results.to_csv().encode('utf-8')
+    file_name = f"REG_{cities}_{target_col}_R{nd_size_km}.csv"
+    st.download_button(label="Save as CSV",
+                        data=csv_to_save,
+                        file_name=file_name,
+                        mime='text/csv')
+
+cf_cols = ['Housing footprint',
+    'Vehicle possession footprint',
+    'Public transportation footprint',
+    'Leisure travel footprint',
+    'Goods and services footprint',
+    'Pets footprint',
+    'Summer house footprint',
+    'Total footprint']
+#df_part = regs.partial_corr(df=df_for_reg_normalized,cf_cols=cf_cols,corr_target="lu_malls",covar=control_cols)
+#st.data_editor(df_part,use_container_width=True, height=700)
