@@ -135,7 +135,7 @@ def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols):
         base_cols_str = ' + '.join([format_col(col) for col in base_cols])
         ext_cols_str = ' + '.join([format_col(col) for col in ext_cols])
         
-        if control_cols is not None:
+        if control_cols is not None and len(control_cols) > 0:
             control_cols_str = ' + '.join([format_col(col) for col in control_cols])
             base_formula = f'{domain_col} ~ {base_cols_str} + {control_cols_str}'
             ext_formula = f'{domain_col} ~ {base_cols_str} + {ext_cols_str} + {control_cols_str}'

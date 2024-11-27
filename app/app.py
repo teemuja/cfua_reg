@@ -101,7 +101,6 @@ base_cols = ['Household type', 'Car in household','Age']
     
 my_reg_results = None
 if len(target_cities) > 0:
-    
     #filter with target and drop nan and other lu_classes
     drop_cols = [col for col in cfua_data.columns if col.startswith('lu_nan') or col.startswith('lu_other')]
     cfua_data_for_city = cfua_data[cfua_data['fua_name'].isin(target_cities)].drop(columns=drop_cols)
@@ -129,10 +128,11 @@ if len(target_cities) > 0:
         @st.fragment()
         def plotter(df):
             plot_holder = st.empty()
+            st.caption("Graph becomes fragmented if any radius(x-axis) is out of P-value limit.")
             p1,p2 = st.columns(2)
             if p1.toggle('P-value filter'):
                 p_mean = my_reg_results['ext_p'].mean()
-                p = p2.slider('P-value limit (mean as max)',0.05,p_mean,p_mean,step=0.01)
+                p = p2.slider('P-value limit (sample mean as max)',0.05,p_mean,p_mean,step=0.01)
             else:
                 p = 1
             fig = utils.prepare_data_for_plotly_chart(df,p_limit=p)
@@ -140,14 +140,6 @@ if len(target_cities) > 0:
                 st.plotly_chart(fig, use_container_width=True)
         plotter(my_reg_results)
 
-    with st.expander(f'Sample data {target_cities}', expanded=False):    
-        st.data_editor(cfua_data_for_city.describe(),use_container_width=True)
-        csv_to_save = cfua_data_for_city.to_csv().encode('utf-8')
-        file_name = f"CFUA_{cities}.csv"
-        st.download_button(label="Save as CSV",
-                            data=csv_to_save,
-                            file_name=file_name,
-                            mime='text/csv')
             
     with st.expander(f'Regression table {target_cities}', expanded=False):    
         st.data_editor(my_reg_results,use_container_width=True, height=900)
@@ -158,3 +150,11 @@ if len(target_cities) > 0:
         st.data_editor(df_part,use_container_width=True)
         st.caption('https://pingouin-stats.org/build/html/generated/pingouin.partial_corr.html , https://en.wikipedia.org/wiki/Partial_correlation')
 
+    with st.expander(f'Sample data {target_cities}', expanded=False):    
+            st.data_editor(cfua_data_for_city.describe(),use_container_width=True)
+            csv_to_save = cfua_data_for_city.to_csv().encode('utf-8')
+            file_name = f"CFUA_{cities}.csv"
+            st.download_button(label="Save as CSV",
+                                data=csv_to_save,
+                                file_name=file_name,
+                                mime='text/csv')
