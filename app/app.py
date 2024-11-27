@@ -153,7 +153,7 @@ if len(target_cities) > 0:
     with st.expander(f'Sample data {target_cities}', expanded=False):    
             st.data_editor(cfua_data_for_city.describe(),use_container_width=True)
             csv_to_save = cfua_data_for_city.to_csv().encode('utf-8')
-            file_name = f"CFUA_{cities}.csv"
+            file_name = f"CFUA_{target_cities}.csv"
             st.download_button(label="Save as CSV",
                                 data=csv_to_save,
                                 file_name=file_name,
