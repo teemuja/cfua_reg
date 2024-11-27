@@ -70,10 +70,47 @@ with st.status('Connecting database..') as dbstatus:
     cfua_data = load_db(s3_url).drop(columns=['__index_level_0__'])
     total_n = len(cfua_data[cfua_data['Total footprint'] != 0])
     st.info(f"Nordic CF data N{total_n}. Memory usage {round(cfua_data.memory_usage(deep=True).sum() / (1024**2),1)} MB")
-    s1,s2 =st.columns(2)
-    s1.data_editor(cfua_data)
-    s2.text(cfua_data.dtypes)
-    #st.text(cfua_data.isna().sum())
+    
+    #package lu_cols
+    #lu_cols_orig = [col for col in cfua_data.columns if col.startswith('lu')]
+    def package_cols(df,target_cols=["lu_other", "lu_nan"],new_col_name="lu_unknown"):
+        suffixes = ["R1", "R3", "R5", "R7", "R9"]
+        for suffix in suffixes:
+            # Find columns matching the current suffix and target groups
+            matching_cols = [
+                col for col in df.columns
+                if any(col.startswith(group) and col.endswith(suffix) for group in target_cols)
+            ]
+            # Sum the selected columns row-wise and assign to a new column
+            if matching_cols:  # Only if matching columns exist
+                df[f"{new_col_name}_{suffix}"] = df[matching_cols].sum(axis=1)
+            #drop targets
+            for col in target_cols:
+                drop_col = f"{col}_{suffix}"
+                df = df.drop(columns=drop_col)
+        return df
+    
+    cfua_data = package_cols(cfua_data,
+                             target_cols=["lu_continuous","lu_discont_high"],
+                             new_col_name="lu_urban")
+    
+    cfua_data = package_cols(cfua_data,
+                             target_cols=["lu_discont_med","lu_discont_low"],
+                             new_col_name="lu_suburban")
+    
+    cfua_data = package_cols(cfua_data,
+                             target_cols=["lu_facility_landuse","lu_other", "lu_nan"],
+                             new_col_name="lu_unknown")
+    # urban, suburban, leisure, malls
+# 2:"lu_discont_low_R1"
+# 3:"lu_continuous_R1"
+# 4:"lu_malls_R1"
+# 5:"lu_discont_high_R1"
+# 6:"lu_leisure_landuse_R1"
+# 7:"lu_discont_med_R1"
+# 8:"lu_facility_landuse_R1"
+# 9:"lu_nan_R1"
+
     dbstatus.update(label="DB connected!", state="complete", expanded=False)
 
 #cols
@@ -102,7 +139,7 @@ base_cols = ['Household type', 'Car in household','Age']
 my_reg_results = None
 if len(target_cities) > 0:
     #filter with target and drop nan and other lu_classes
-    drop_cols = [col for col in cfua_data.columns if col.startswith('lu_nan') or col.startswith('lu_other')]
+    drop_cols = [col for col in cfua_data.columns if col.startswith('lu_unknown')]
     cfua_data_for_city = cfua_data[cfua_data['fua_name'].isin(target_cities)].drop(columns=drop_cols)
 
     #normalize for reg
@@ -124,7 +161,7 @@ if len(target_cities) > 0:
 
     with st.expander(f"Sample {target_cities} with N{len(cfua_data_for_city)}", expanded=True):
         #simple_chart_data = utils.prepare_chart_data(my_reg_results)
-        #st.area_chart(data=simple_chart_data,x_label='Radius',y_label='ext_r Value')
+        #st.area_chart(data=simple_chart_data,x_label='Radius',y_label='ext_r Value') 
         @st.fragment()
         def plotter(df):
             plot_holder = st.empty()
