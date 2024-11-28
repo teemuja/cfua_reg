@@ -53,7 +53,7 @@ if not auth:
 
 with st.status('Connecting database..') as dbstatus:
     st.caption(f'Duckdb v{duckdb.__version__}')
-    s3_url = f"{st.secrets['allas']['allas_url']}/CFUA/RD/cfua_data_nordics_merged_N2119.parquet"
+    s3_url = f"{st.secrets['allas']['allas_url']}/CFUA/RD/cfua_data_nordics_merged_V2_N2119.parquet"
     #not merged file: cfua_data_with_landuse_nordics_cf_N1827.parquet"
     
     @st.cache_data()
@@ -92,27 +92,33 @@ with st.status('Connecting database..') as dbstatus:
     
     cfua_data = package_cols(cfua_data,
                              target_cols=["lu_continuous","lu_discont_high"],
-                             new_col_name="lu_urban")
+                             new_col_name="lu_urban_fabric")
     
     cfua_data = package_cols(cfua_data,
                              target_cols=["lu_discont_med","lu_discont_low"],
-                             new_col_name="lu_suburban")
+                             new_col_name="lu_suburban_fabric")
+    
+    cfua_data = package_cols(cfua_data,
+                             target_cols=["lu_shopping_retail","lu_food_dining"],
+                             new_col_name="lu_consumer_services")
+    
+    cfua_data = package_cols(cfua_data,
+                             target_cols=["lu_leisure_landuse","lu_green_areas"],
+                             new_col_name="lu_green_and_recreation")
+    
+    cfua_data = package_cols(cfua_data,
+                             target_cols=["lu_diversity"],
+                             new_col_name="lu_high_diversity")
     
     cfua_data = package_cols(cfua_data,
                              target_cols=["lu_facility_landuse","lu_other", "lu_nan"],
                              new_col_name="lu_unknown")
+    
     # urban, suburban, leisure, malls
-# 2:"lu_discont_low_R1"
-# 3:"lu_continuous_R1"
-# 4:"lu_malls_R1"
-# 5:"lu_discont_high_R1"
-# 6:"lu_leisure_landuse_R1"
-# 7:"lu_discont_med_R1"
-# 8:"lu_facility_landuse_R1"
-# 9:"lu_nan_R1"
 
     dbstatus.update(label="DB connected!", state="complete", expanded=False)
-
+#st.data_editor(cfua_data)
+#st.stop()
 #cols
 cf_cols = [
     'Total footprint',

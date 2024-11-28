@@ -89,12 +89,25 @@ def prepare_data_for_plotly_chart(df,p_limit=0.01): #, exclude_classes=['nan', '
         
         class_data = plot_df[plot_df['Land Use'] == lu_class]
         
+        custom_color_map = {
+                            "diversity": "violet",
+                            "high_diversity": "violet",
+                            "urban_fabric": "brown",
+                            "suburban_fabric": "burlywood",
+                            "shopping_retail":"red",
+                            "consumer_services":"red",
+                            "food_dining":"orange",
+                            "leisure_landuse": "olive",
+                            "green_areas":"darkgreen",
+                            "green_and_recreation":"darkgreen",
+                        }
         fig.add_trace(
             go.Scatter(
                 x=class_data['Radius'],
                 y=class_data['ext_r'],
                 name=lu_class,
                 mode='lines',
+                line=dict(color=custom_color_map.get(lu_class, 'gray')),
                 #stackgroup='one',  # This creates the stacked area effect
                 hovertemplate=(
                     f"<b>{lu_class}</b><br>" +
