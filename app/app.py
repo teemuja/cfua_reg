@@ -68,8 +68,6 @@ with st.status('Connecting database..') as dbstatus:
         return cfua #fuas
     
     cfua_data = load_db(s3_url).drop(columns=['__index_level_0__'])
-    total_n = len(cfua_data[cfua_data['Total footprint'] != 0])
-    st.info(f"Nordic CF data N{total_n}. Memory usage {round(cfua_data.memory_usage(deep=True).sum() / (1024**2),1)} MB")
     
     #package lu_cols
     #lu_cols_orig = [col for col in cfua_data.columns if col.startswith('lu')]
@@ -98,6 +96,10 @@ with st.status('Connecting database..') as dbstatus:
                              target_cols=["lu_discont_med","lu_discont_low"],
                              new_col_name="lu_suburban_fabric")
     
+    # cfua_data = package_cols(cfua_data,
+    #                          target_cols=["lu_discont_low"],
+    #                          new_col_name="lu_periurban_fabric")
+    
     cfua_data = package_cols(cfua_data,
                              target_cols=["lu_shopping_retail","lu_food_dining"],
                              new_col_name="lu_consumer_services")
@@ -106,31 +108,54 @@ with st.status('Connecting database..') as dbstatus:
                              target_cols=["lu_leisure_landuse","lu_green_areas"],
                              new_col_name="lu_green_and_recreation")
     
-    cfua_data = package_cols(cfua_data,
-                             target_cols=["lu_diversity"],
-                             new_col_name="lu_high_diversity")
+    # cfua_data = package_cols(cfua_data,
+    #                          target_cols=["lu_diversity"],
+    #                          new_col_name="lu_high_diversity")
     
     cfua_data = package_cols(cfua_data,
-                             target_cols=["lu_facility_landuse","lu_other", "lu_nan"],
+                             target_cols=["lu_diversity","lu_facility_landuse","lu_other", "lu_nan"],
                              new_col_name="lu_unknown")
     
-    # urban, suburban, leisure, malls
-
-    dbstatus.update(label="DB connected!", state="complete", expanded=False)
-#st.data_editor(cfua_data)
-#st.stop()
-#cols
-cf_cols = [
-    'Total footprint',
-    'Housing footprint',
-    'Vehicle possession footprint',
-    'Public transportation footprint',
-    'Leisure travel footprint',
-    'Goods and services footprint',
-    'Pets footprint',
-    'Summer house footprint',
-    'Diet footprint',
-    ]
+    drop_cols = [col for col in cfua_data.columns if col.startswith('lu_unknown')]
+    cfua_data = cfua_data.drop(columns=drop_cols)
+    cf_cols = [
+            'Total footprint',
+            'Housing footprint',
+            'Vehicle possession footprint',
+            'Public transportation footprint',
+            'Leisure travel footprint',
+            'Goods and services footprint',
+            'Pets footprint',
+            'Summer house footprint',
+            'Diet footprint',
+            ]
+    s1,s2,s3 = st.columns(3)
+    cluster = s1.select_slider("Clustering using median aggregation on h3 level",['No clustering',9,8,7])
+    if cluster != "No clustering":
+        def agg_cf_values(df_in,r=9):
+            df = df_in.copy()
+            df[f'h3_0{r}'] = df["h3_10"].apply(lambda x: h3.cell_to_parent(x, r))
+            all_cols = df.select_dtypes(include=['number']).columns.tolist()
+            aggregated_df = df.groupby(f'h3_0{r}')[all_cols].median().reset_index()
+            #add new 10 level id using centers of aggregated 09 cells
+            aggregated_df['new_h3_10'] = aggregated_df[f'h3_0{r}'].apply(lambda x: h3.cell_to_center_child(x, 10))
+            df_out = df.merge(aggregated_df, on=f'h3_0{r}', suffixes=('', '_agg'))
+            for col in all_cols:
+                df_out[col] = df_out[f"{col}_agg"]
+                df_out = df_out.drop(columns=[f"{col}_agg" ])
+            #replace h3_10 with new centers of aggregation
+            df_out['h3_10'] = df_out['new_h3_10']
+            #df_out = df_out.drop_duplicates(subset=['h3_10'])
+            df_out = df_out.groupby('h3_10', as_index=False).agg('first')
+            return df_out.drop(columns=[f'h3_0{r}','new_h3_10'])
+        cfua_data = agg_cf_values(df_in=cfua_data,r=cluster)
+        
+    st.data_editor(cfua_data.describe())
+    #st.data_editor(cfua_data)
+    total_n = len(cfua_data[cfua_data['Total footprint'] != 0])
+    st.info(f"Nordic CF data N{total_n}. Memory usage {round(cfua_data.memory_usage(deep=True).sum() / (1024**2),1)} MB")
+    
+    dbstatus.update(label="DB connected!", state="complete", expanded=True)
 
 cities = cfua_data['fua_name'].unique().tolist()
 s1,s2,s3 = st.columns(3)
@@ -144,9 +169,9 @@ base_cols = ['Household type', 'Car in household','Age']
     
 my_reg_results = None
 if len(target_cities) > 0:
-    #filter with target and drop nan and other lu_classes
-    drop_cols = [col for col in cfua_data.columns if col.startswith('lu_unknown')]
-    cfua_data_for_city = cfua_data[cfua_data['fua_name'].isin(target_cities)].drop(columns=drop_cols)
+    
+    #filter with targets
+    cfua_data_for_city = cfua_data[cfua_data['fua_name'].isin(target_cities)]
 
     #normalize for reg
     def normalize_df(df_in,cols=None):
@@ -171,11 +196,11 @@ if len(target_cities) > 0:
         @st.fragment()
         def plotter(df):
             plot_holder = st.empty()
-            st.caption("Graph becomes fragmented if any radius(x-axis) is out of P-value limit.")
             p1,p2 = st.columns(2)
-            if p1.toggle('P-value filter'):
+            if p1.toggle('P-value limit'):
                 p_mean = my_reg_results['ext_p'].mean()
                 p = p2.slider('P-value limit (sample mean as max)',0.05,p_mean,p_mean,step=0.01)
+                p1.caption("Graph becomes fragmented if any radius(x-axis) is out of P-value limit.")
             else:
                 p = 1
             fig = utils.prepare_data_for_plotly_chart(df,p_limit=p)
