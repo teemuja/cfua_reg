@@ -190,7 +190,7 @@ if len(target_cities) > 0:
     
     my_reg_results = utils.ols_reg_table(df_for_reg_normalized,target_col,base_cols,cat_cols,lu_cols,control_cols)
 
-    with st.expander(f"Sample {target_cities} with N{len(cfua_data_for_city)}", expanded=True):
+    with st.expander(f"Sample {target_cities} with N{len(cfua_data_for_city)} on {target_col} , Cluster reso: {cluster}", expanded=True):
         #simple_chart_data = utils.prepare_chart_data(my_reg_results)
         #st.area_chart(data=simple_chart_data,x_label='Radius',y_label='ext_r Value') 
         @st.fragment()
@@ -211,6 +211,14 @@ if len(target_cities) > 0:
             
     with st.expander(f'Regression table {target_cities}', expanded=False):    
         st.data_editor(my_reg_results,use_container_width=True, height=900)
+        reg_csv_to_save = my_reg_results.to_csv().encode('utf-8')
+        target_domain = target_col.lower().replace(' ', '_')
+        target_cases = '_'.join(target_cities).lower()
+        file_name = f"CFUAregs_{target_domain}_{target_cases}.csv"
+        st.download_button(label="Save as CSV",
+                            data=reg_csv_to_save,
+                            file_name=file_name,
+                            mime='text/csv')
 
     with st.expander(f'Partial correlation {target_cities}', expanded=False):
         target_lu = st.selectbox('Select land-use target by radius',lu_cols)
