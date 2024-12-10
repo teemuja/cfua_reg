@@ -47,7 +47,89 @@ def prepare_area_chart_data(df):
     return chart_data
 
 
-def prepare_data_for_plotly_chart(df,p_limit=0.01): #, exclude_classes=['nan', 'other']
+def prepare_data_for_plotly_chart(df, p_limit=0.01):
+    # Extract unique land use classes from index
+    lu_classes = set('_'.join(idx.split('_')[1:-1]) for idx in df.index if 'lu_' in idx)
+    
+    # Create new dataframe for visualization
+    plot_data = []
+    
+    for lu_class in lu_classes:
+        # Get rows for this land use class
+        class_rows = [idx for idx in df.index if f'lu_{lu_class}_r' in idx]
+        
+        # Extract radius values and both ext_r and ext_p values
+        for row in class_rows:
+            radius = int(row.split('_r')[-1])  # Extract the radius number
+            plot_data.append({
+                'Land Use': lu_class,
+                'Radius': f'r{radius}',
+                'ext_r': df.loc[row, 'ext_r'],
+                'ext_p': df.loc[row, 'ext_p']
+            })
+    
+    # Convert to DataFrame and sort
+    plot_df_all = pd.DataFrame(plot_data)
+    plot_df_all['Radius'] = plot_df_all['Radius'].str.extract(r'r(\d+)').astype(int)  # Extract radius as integer
+    plot_df_all = plot_df_all.sort_values(['Land Use', 'Radius'])  # Sort by Land Use and Radius
+    
+    # Filter data based on p-value
+    plot_df = plot_df_all[plot_df_all['ext_p'] <= p_limit].copy()
+    
+    # Prep plot
+    fig = go.Figure()
+    
+    # Get unique land use classes
+    lu_classes = plot_df['Land Use'].unique()
+    
+    # Add traces for each land use class
+    for lu_class in lu_classes:
+        class_data = plot_df[plot_df['Land Use'] == lu_class]
+        class_data = class_data.sort_values('Radius')  # Ensure data is sorted by Radius
+        
+        custom_color_map = {
+            "diversity": "violet",
+            "high_diversity": "violet",
+            "urban_fabric": "brown",
+            "suburban_fabric": "burlywood",
+            "shopping_retail": "red",
+            "consumer_services": "red",
+            "food_dining": "orange",
+            "leisure_landuse": "olive",
+            "green_areas": "darkgreen",
+            "green_and_recreation": "darkgreen",
+        }
+        fig.add_trace(
+            go.Scatter(
+                x=class_data['Radius'],
+                y=class_data['ext_r'],
+                name=lu_class,
+                mode='lines',
+                line=dict(color=custom_color_map.get(lu_class, 'gray')),
+                hovertemplate=(
+                    f"<b>{lu_class}</b><br>" +
+                    "Radius: %{x}<br>" +
+                    "ext_r: %{y:.3f}<br>" +
+                    "ext_p: %{customdata:.3f}<extra></extra>"
+                ),
+                customdata=class_data['ext_p']
+            )
+        )
+    
+    # Update layout
+    fig.update_layout(
+        title="Land-use feature´s r by radius",
+        xaxis_title="Radius",
+        yaxis_title="ext_r Value",
+        hovermode='x unified',
+        showlegend=True
+    )
+    
+    return fig
+
+
+
+def prepare_data_for_plotly_chart_old(df,p_limit=0.01):
     # Extract unique land use classes from index
     lu_classes = set('_'.join(idx.split('_')[1:-1]) for idx in df.index if 'lu_' in idx)
     
@@ -191,7 +273,13 @@ def partial_corr(df,cf_cols,corr_target,covar='Income level decile'):
     return df_all
 
 
-# ------- services aggregation and sdi classification --------
+
+
+
+
+
+
+# ------- services aggregation and sdi classification IF used in app --------
 
 def classify_service_diversity(df_in, service_col='services', categories_dict=None):
     

@@ -116,8 +116,9 @@ with st.status('Connecting database..') as dbstatus:
                              target_cols=["lu_diversity","lu_facility_landuse","lu_other", "lu_nan"],
                              new_col_name="lu_unknown")
     
-    drop_cols = [col for col in cfua_data.columns if col.startswith('lu_unknown')]
-    cfua_data = cfua_data.drop(columns=drop_cols)
+    drop_lu_unknowns = [col for col in cfua_data.columns if col.startswith('lu_unknown')]
+    cfua_data = cfua_data.drop(columns=drop_lu_unknowns)
+    
     cf_cols = [
             'Total footprint',
             'Housing footprint',
@@ -133,7 +134,10 @@ with st.status('Connecting database..') as dbstatus:
     cluster = s1.select_slider("Clustering using median aggregation on h3 level",['No clustering',9,8,7])
     if cluster != "No clustering":
         def agg_cf_values(df_in,r=9):
-            df = df_in.copy()
+            #drop these when clustered
+            drop_cols = ['Country','Number of persons in household','Car in household']
+            df = df_in.drop(columns=drop_cols)
+            
             df[f'h3_0{r}'] = df["h3_10"].apply(lambda x: h3.cell_to_parent(x, r))
             all_cols = df.select_dtypes(include=['number']).columns.tolist()
             aggregated_df = df.groupby(f'h3_0{r}')[all_cols].median().reset_index()
@@ -161,11 +165,14 @@ cities = cfua_data['fua_name'].unique().tolist()
 s1,s2,s3 = st.columns(3)
 target_cities = s1.multiselect("Target Cities",cities,default="Helsinki")
 target_col = s2.selectbox("Target domain",cf_cols)
-cat_cols = ['Household per capita income decile', 'Household type', 'Car in household'] #,'Urban degree']
+if cluster == "No clustering":
+    cat_cols = ['Household per capita income decile', 'Household type', 'Car in household']
+    base_cols = ['Household type', 'Car in household','Age']
+else:
+    cat_cols = ['Household per capita income decile', 'Household type']
+    base_cols = ['Household type', 'Age']
+    
 control_cols = s3.multiselect('Control cols',cat_cols,default='Household per capita income decile')
-#nd_size_km = s1.slider("Set radius for the neighborhood to use (km)",1,9,3,step=2)
-cluster_reso = 10 #s2.slider("..or set clustering resolution (h3)",7,10,10,step=1)
-base_cols = ['Household type', 'Car in household','Age']
     
 my_reg_results = None
 if len(target_cities) > 0:
