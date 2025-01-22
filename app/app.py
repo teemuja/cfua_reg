@@ -79,20 +79,20 @@ with st.status('Connecting database..') as dbstatus:
             combined_table = f"""
                     DROP TABLE IF EXISTS combined_table;
                     CREATE TABLE combined_table AS 
-                    SELECT *, 'R1' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND1km.parquet')
+                    SELECT *, 'R1' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND1km_no-sdi.parquet')
                     UNION ALL
-                    SELECT *, 'R3' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND3km.parquet')
+                    SELECT *, 'R3' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND3km_no-sdi.parquet')
                     UNION ALL
-                    SELECT *, 'R5' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND5km.parquet')
+                    SELECT *, 'R5' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND5km_no-sdi.parquet')
                     UNION ALL
-                    SELECT *, 'R9' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND9km.parquet')
+                    SELECT *, 'R9' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND9km_no-sdi.parquet')
                 """
             duckdb.sql(combined_table)
             df = duckdb.sql("SELECT * FROM combined_table").to_df().drop(columns=['__index_level_0__'])
             cols = ['R'] + [col for col in df.columns if col != 'R']
             df_out = df[cols]
         else:
-            df_out = duckdb.sql(f"SELECT * FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND{R}km.parquet')").to_df().drop(columns=['__index_level_0__'])
+            df_out = duckdb.sql(f"SELECT * FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND{R}km_no-sdi.parquet')").to_df().drop(columns=['__index_level_0__'])
         
         return df_out.drop(columns="lu_other")
 
