@@ -165,4 +165,5 @@ cython_debug/
 cache
 __pycache__
 .DS_Store
+temp
 secrets.toml

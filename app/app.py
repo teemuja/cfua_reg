@@ -1,32 +1,47 @@
+# NDP app always beta a lot
 import streamlit as st
 import pandas as pd
-import numpy as np
 import geopandas as gpd
-from shapely import Point, wkt, ops
-from shapely.wkt import loads, dumps
-import h3 as h3
+import h3
+import numpy as np
+from shapely import wkt
+from shapely.geometry import MultiPoint, Point
 import math
-import json
-import ast
 import geocoder
-
-#DB con
-import io
-import requests
+from sklearn.cluster import DBSCAN
 import duckdb
-import boto3
-
-import utils
-
+import requests
+import io
+import re
 import plotly.express as px
-import plotly.graph_objects as go
-px.set_mapbox_access_token(st.secrets['mapbox']['MAPBOX_TOKEN'])
-my_style = st.secrets['mapbox']['MAPBOX_STYLE']
+import plotly.graph_objs as go
+from plotly.subplots import make_subplots
+import json
 
-#page confs
-title = "CFUA reg"
-st.set_page_config(page_title=title, layout="wide")
-st.header(title,divider="red")
+#ML
+from scipy import stats
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+
+px.set_mapbox_access_token(st.secrets['mapbox']['MAPBOX_TOKEN'])
+mbtoken = st.secrets['mapbox']['MAPBOX_TOKEN']
+my_style = st.secrets['mapbox']['MAPBOX_STYLE']
+cfua_allas = st.secrets['allas']['url']
+allas_key = st.secrets['allas']['access_key_id']
+allas_secret = st.secrets['allas']['secret_access_key']
+
+st.set_page_config(page_title="Research App", layout="wide", initial_sidebar_state='expanded')
+st.markdown("""
+<style>
+button[title="View fullscreen"]{
+        visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+# content
+st.header("CFUA",divider="red")
+st.subheader("Climate Friendly Urban Architecture")
+st.markdown("###")
 
 def check_password():
     def password_entered():
@@ -47,197 +62,281 @@ def check_password():
     else:
         return True
 
+
 auth = check_password()
 if not auth:
     st.stop()
 
 with st.status('Connecting database..') as dbstatus:
     st.caption(f'Duckdb v{duckdb.__version__}')
-    s3_url = f"{st.secrets['allas']['allas_url']}/CFUA/RD/cfua_data_nordics_merged_V2_N2119.parquet"
-    #not merged file: cfua_data_with_landuse_nordics_cf_N1827.parquet"
     
     @st.cache_data()
-    def load_db(s3_url):
+    def load_data(R=None):
+        allas_url = f"{st.secrets['allas']['url']}"
         duckdb.sql("INSTALL httpfs;")
         duckdb.sql("LOAD httpfs;")
-        #column_name = 'fua_name'
-        #fua_names_query = f"SELECT DISTINCT {column_name} FROM read_parquet('{s3_url}');"
-        all_query = f"SELECT * FROM read_parquet('{s3_url}');"
-        #fuas = duckdb.query(all_query).to_df()[column_name].tolist()
-        cfua = duckdb.query(all_query).to_df()
-        return cfua #fuas
-    
-    cfua_data = load_db(s3_url).drop(columns=['__index_level_0__'])
-    
-    #package lu_cols
-    #lu_cols_orig = [col for col in cfua_data.columns if col.startswith('lu')]
-    def package_cols(df,target_cols=["lu_other", "lu_nan"],new_col_name="lu_unknown"):
-        suffixes = ["R1", "R3", "R5", "R7", "R9"]
-        for suffix in suffixes:
-            # Find columns matching the current suffix and target groups
-            matching_cols = [
-                col for col in df.columns
-                if any(col.startswith(group) and col.endswith(suffix) for group in target_cols)
-            ]
-            # Sum the selected columns row-wise and assign to a new column
-            if matching_cols:  # Only if matching columns exist
-                df[f"{new_col_name}_{suffix}"] = df[matching_cols].sum(axis=1)
-            #drop targets
-            for col in target_cols:
-                drop_col = f"{col}_{suffix}"
-                df = df.drop(columns=drop_col)
-        return df
-    
-    cfua_data = package_cols(cfua_data,
-                             target_cols=["lu_continuous","lu_discont_high"],
-                             new_col_name="lu_urban_fabric")
-    
-    cfua_data = package_cols(cfua_data,
-                             target_cols=["lu_discont_med","lu_discont_low"],
-                             new_col_name="lu_suburban_fabric")
-    
-    # cfua_data = package_cols(cfua_data,
-    #                          target_cols=["lu_discont_low"],
-    #                          new_col_name="lu_periurban_fabric")
-    
-    cfua_data = package_cols(cfua_data,
-                             target_cols=["lu_shopping_retail","lu_food_dining"],
-                             new_col_name="lu_consumer_services")
-    
-    cfua_data = package_cols(cfua_data,
-                             target_cols=["lu_leisure_landuse","lu_green_areas"],
-                             new_col_name="lu_green_and_recreation")
-    
-    # cfua_data = package_cols(cfua_data,
-    #                          target_cols=["lu_diversity"],
-    #                          new_col_name="lu_high_diversity")
-    
-    cfua_data = package_cols(cfua_data,
-                             target_cols=["lu_diversity","lu_facility_landuse","lu_other", "lu_nan"],
-                             new_col_name="lu_unknown")
-    
-    drop_lu_unknowns = [col for col in cfua_data.columns if col.startswith('lu_unknown')]
-    cfua_data = cfua_data.drop(columns=drop_lu_unknowns)
-    
-    cf_cols = [
-            'Total footprint',
-            'Housing footprint',
-            'Vehicle possession footprint',
-            'Public transportation footprint',
-            'Leisure travel footprint',
-            'Goods and services footprint',
-            'Pets footprint',
-            'Summer house footprint',
-            'Diet footprint',
-            ]
-    s1,s2,s3 = st.columns(3)
-    cluster = s1.select_slider("Clustering using median aggregation on h3 level",['No clustering',9,8,7])
-    if cluster != "No clustering":
-        def agg_cf_values(df_in,r=9):
-            #drop these when clustered
-            drop_cols = ['Country','Number of persons in household','Car in household']
-            df = df_in.drop(columns=drop_cols)
-            
-            df[f'h3_0{r}'] = df["h3_10"].apply(lambda x: h3.cell_to_parent(x, r))
-            all_cols = df.select_dtypes(include=['number']).columns.tolist()
-            aggregated_df = df.groupby(f'h3_0{r}')[all_cols].median().reset_index()
-            #add new 10 level id using centers of aggregated 09 cells
-            aggregated_df['new_h3_10'] = aggregated_df[f'h3_0{r}'].apply(lambda x: h3.cell_to_center_child(x, 10))
-            df_out = df.merge(aggregated_df, on=f'h3_0{r}', suffixes=('', '_agg'))
-            for col in all_cols:
-                df_out[col] = df_out[f"{col}_agg"]
-                df_out = df_out.drop(columns=[f"{col}_agg" ])
-            #replace h3_10 with new centers of aggregation
-            df_out['h3_10'] = df_out['new_h3_10']
-            #df_out = df_out.drop_duplicates(subset=['h3_10'])
-            df_out = df_out.groupby('h3_10', as_index=False).agg('first')
-            return df_out.drop(columns=[f'h3_0{r}','new_h3_10'])
-        cfua_data = agg_cf_values(df_in=cfua_data,r=cluster)
+        if R is None:
+            combined_table = f"""
+                    DROP TABLE IF EXISTS combined_table;
+                    CREATE TABLE combined_table AS 
+                    SELECT *, 'R1' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND1km.parquet')
+                    UNION ALL
+                    SELECT *, 'R3' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND3km.parquet')
+                    UNION ALL
+                    SELECT *, 'R5' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND5km.parquet')
+                    UNION ALL
+                    SELECT *, 'R9' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND9km.parquet')
+                """
+            duckdb.sql(combined_table)
+            df = duckdb.sql("SELECT * FROM combined_table").to_df().drop(columns=['__index_level_0__'])
+            cols = ['R'] + [col for col in df.columns if col != 'R']
+            df_out = df[cols]
+        else:
+            df_out = duckdb.sql(f"SELECT * FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND{R}km.parquet')").to_df().drop(columns=['__index_level_0__'])
         
-    st.data_editor(cfua_data.describe())
-    #st.data_editor(cfua_data)
-    total_n = len(cfua_data[cfua_data['Total footprint'] != 0])
-    st.info(f"Nordic CF data N{total_n}. Memory usage {round(cfua_data.memory_usage(deep=True).sum() / (1024**2),1)} MB")
-    
-    dbstatus.update(label="DB connected!", state="complete", expanded=True)
+        return df_out.drop(columns="lu_other")
 
-cities = cfua_data['fua_name'].unique().tolist()
-s1,s2,s3 = st.columns(3)
-target_cities = s1.multiselect("Target Cities",cities,default="Helsinki")
-target_col = s2.selectbox("Target domain",cf_cols)
-if cluster == "No clustering":
-    cat_cols = ['Household per capita income decile', 'Household type', 'Car in household']
-    base_cols = ['Household type', 'Car in household','Age']
+
+    data = load_data()
+    if st.toggle('Described'):
+        st.data_editor(data.describe(),key="init_desc")
+    else:
+        st.data_editor(data,key="init")
+
+    dbstatus.update(label="DB connected!", state="complete", expanded=False)
+
+def normalize_df(df_in,cols=None):
+    df = df_in.copy()
+    if cols is None:
+        cols = df.select_dtypes(include=np.number).columns.tolist()
+    for col in cols:
+        df[col] = df[col] / df[col].abs().max()
+    return df
+
+#@st.cache_data()
+def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols):
+
+    df = normalize_df(df_in)
+
+    def ols(df, cf_col, base_cols, cat_cols, ext_cols, control_cols):
+        cat_cols_lower = [col.lower().replace(' ', '_') for col in cat_cols]
+        
+        def format_col(col):
+            col_lower = col.lower().replace(' ', '_')
+            return f'C({col_lower})' if col_lower in cat_cols_lower else col_lower
+        
+        domain_col = cf_col.lower().replace(' ', '_')
+        df.columns = df.columns.str.lower().str.replace(' ', '_')
+        
+        base_cols_str = ' + '.join([format_col(col) for col in base_cols])
+        ext_cols_str = ' + '.join([format_col(col) for col in ext_cols])
+        
+        if control_cols is not None and len(control_cols) > 0:
+            control_cols_str = ' + '.join([format_col(col) for col in control_cols])
+            base_formula = f'{domain_col} ~ {base_cols_str} + {control_cols_str}'
+            ext_formula = f'{domain_col} ~ {base_cols_str} + {ext_cols_str} + {control_cols_str}'
+        else:
+            base_formula = f'{domain_col} ~ {base_cols_str}'
+            ext_formula = f'{domain_col} ~ {base_cols_str} + {ext_cols_str}'
+        
+        # Remove extra spaces for column selection
+        formula_vars = re.split(r'\s*\+\s*', ext_formula.split('~')[1].strip())
+        formula_vars = [col.strip() for col in formula_vars]
+        
+        base_model = smf.ols(formula=base_formula, data=df)
+        base_results = base_model.fit()
+        ext_model = smf.ols(formula=ext_formula, data=df)
+        ext_results = ext_model.fit()
+
+        return base_results, ext_results
+    
+    base_results, ext_results = ols(df, cf_col, base_cols, cat_cols, ext_cols, control_cols)
+    rounder = 3
+    reg_results = pd.DataFrame({
+        'base_r': round(base_results.params, rounder),
+        'base_p': round(base_results.pvalues, rounder),
+        'ext_r': round(ext_results.params, rounder),
+        'ext_p': round(ext_results.pvalues, rounder)
+        })
+    
+    return reg_results
+
+#reg_df = ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols)
+cities = data['fua_name'].unique().tolist()
+cf_cols = data.columns.tolist()[5:15]
+lu_cols_orig = [col for col in data.columns if col.startswith('lu')]
+base_cols = ['Household type', 'Car in household','Age']
+
+st1,st2 = st.columns(2)
+target_cities = st1.multiselect("Set sample regions",cities,default=["Helsinki","Stockholm"])
+if target_cities:
+    datac = data[data['fua_name'].isin(target_cities)]
 else:
-    cat_cols = ['Household per capita income decile', 'Household type']
-    base_cols = ['Household type', 'Age']
-    
-control_cols = s3.multiselect('Control cols',cat_cols,default='Household per capita income decile')
-    
-my_reg_results = None
-if len(target_cities) > 0:
-    
-    #filter with targets
-    cfua_data_for_city = cfua_data[cfua_data['fua_name'].isin(target_cities)]
+    st.stop()
 
-    #normalize for reg
-    def normalize_df(df_in,cols=None):
-        df = df_in.copy()
-        if cols is None:
-            cols = df.select_dtypes(include=np.number).columns.tolist()
-        for col in cols:
-            df[col] = df[col] / df[col].abs().max()
-        return df
-    
-    df_for_reg_normalized = normalize_df(cfua_data_for_city)
-    
-    #st.markdown("normalized...")
-    #st.data_editor(df_for_reg_normalized.describe())
-    lu_cols = [col for col in df_for_reg_normalized.columns if col.startswith('lu')]
-    
-    my_reg_results = utils.ols_reg_table(df_for_reg_normalized,target_col,base_cols,cat_cols,lu_cols,control_cols)
 
-    with st.expander(f"Sample {target_cities} with N{len(cfua_data_for_city)} on {target_col} , Cluster reso: {cluster}", expanded=True):
-        #simple_chart_data = utils.prepare_chart_data(my_reg_results)
-        #st.area_chart(data=simple_chart_data,x_label='Radius',y_label='ext_r Value') 
-        @st.fragment()
-        def plotter(df):
-            plot_holder = st.empty()
-            p1,p2 = st.columns(2)
-            if p1.toggle('P-value limit'):
-                p_mean = my_reg_results['ext_p'].mean()
-                p = p2.slider('P-value limit (sample mean as max)',0.05,p_mean,p_mean,step=0.01)
-                p1.caption("Graph becomes fragmented if any radius(x-axis) is out of P-value limit.")
-            else:
-                p = 1
-            fig = utils.prepare_data_for_plotly_chart(df,p_limit=p)
-            with plot_holder:
-                st.plotly_chart(fig, use_container_width=True)
-        plotter(my_reg_results)
 
+with st.expander(f'Reg.settings', expanded=True):
+    s1,s2,s3 = st.columns(3)
+    target_col = s1.selectbox("Target domain",cf_cols,index=9) #last
+    if target_col == "Total footprint unit":
+        cat_cols = ['Household unit income decile', 'Household type', 'Car in household']
+    else:
+        cat_cols = ['Household per capita income decile', 'Household type', 'Car in household']
+    control_col = s2.selectbox('Control column',cat_cols,index=0)
+    remove_cols = s3.multiselect('Remove landuse classes',lu_cols_orig)
+    if remove_cols:
+        datac.drop(columns=remove_cols, inplace=True)
+
+#@st.cache_data()
+def gen_regs_for_plot(data,
+                      target_col,
+                      base_cols,
+                      cat_cols,
+                      lu_cols,
+                      control_cols,
+                      p_limit=False):
+    radius_dfs = {}
+    for r in [1,3,5,9]:
+        df_r = data[data['R'] == f"R{r}"]
+        reg_df = ols_reg_table(df_in=df_r,
+                                cf_col=target_col,
+                                base_cols=base_cols,
+                                cat_cols=cat_cols,
+                                ext_cols=lu_cols,
+                                control_cols=control_cols
+                                )
+        #use only lu cols
+        reg_lu_cols = [col for col in reg_df.T.columns if col.startswith('lu')]
+        reg = reg_df.T[reg_lu_cols].T
+
+        if p_limit:
+            reg = reg[reg['ext_p'] < 0.07]
+
+        radius_dfs[f"R{r}"] = reg
+        
+    return radius_dfs
+
+def plot_ext_r_across_radii(dataframes_dict, regions, target_domain, p_value_threshold=0.07):
+    """
+    Create a line plot of ext_r values for different variables across multiple radii,
+    considering p-value threshold.
+    
+    Parameters:
+    dataframes_dict: dict
+        Dictionary with radius as key and DataFrame as value
+    p_value_threshold: float
+        Maximum p-value to consider a relationship significant (default: 0.05)
+    """
+    # Convert radius keys to numeric values (removing 'R' prefix if exists)
+    numeric_keys = {}
+    for k in dataframes_dict.keys():
+        if isinstance(k, str) and k.startswith('R'):
+            numeric_keys[k] = float(k[1:])  # Convert 'R1', 'R5' etc to 1, 5
+        else:
+            numeric_keys[k] = float(k)  # Already numeric
             
-    with st.expander(f'Regression table {target_cities}', expanded=False):    
-        st.data_editor(my_reg_results,use_container_width=True, height=900)
-        reg_csv_to_save = my_reg_results.to_csv().encode('utf-8')
-        target_domain = target_col.lower().replace(' ', '_')
-        target_cases = '_'.join(target_cities).lower()
-        file_name = f"CFUAregs_{target_domain}_{target_cases}.csv"
-        st.download_button(label="Save as CSV",
-                            data=reg_csv_to_save,
-                            file_name=file_name,
-                            mime='text/csv')
+    # Sort radii numerically
+    sorted_radii = sorted(dataframes_dict.keys(), key=lambda x: numeric_keys[x])
+    
+    # Get all unique variables across all DataFrames
+    all_variables = set()
+    for df in dataframes_dict.values():
+        all_variables.update(df.index.tolist())
+    
+    # Create figure
+    fig = go.Figure()
+    
+    # Process data for each variable
+    for var in all_variables:
+        y_values = []
+        x_values = []
+        p_values = []
+        x_labels = []
+        
+        # Collect valid points (where p-value meets threshold)
+        for radius in sorted_radii:
+            df = dataframes_dict[radius]
+            if var in df.index:
+                p_value = df.loc[var, 'ext_p']
+                if p_value <= p_value_threshold:
+                    x_values.append(numeric_keys[radius])
+                    x_labels.append(str(radius))
+                    y_values.append(df.loc[var, 'ext_r'])
+                    p_values.append(p_value)
+        
+        # Only add trace if we have at least two valid points
+        if len(x_values) >= 2:
+            fig.add_trace(go.Scatter(
+                x=x_values,
+                y=y_values,
+                name=var,
+                mode='lines+markers',
+                hovertemplate=(
+                    'Radius: %{text}<br>' +
+                    'ext_r: %{y:.3f}<br>' +
+                    'p-value: %{customdata:.3f}<extra></extra>'
+                ),
+                text=x_labels,  # Original radius labels for hover
+                customdata=p_values
+            ))
+    
+    # Update layout
+    fig.update_layout(
+        title=f"Correlation between '{target_domain}' and landuse types in {regions} (p<0.07)",
+        xaxis_title='Radius',
+        yaxis_title='ext_r Value',
+        hovermode='x unified',
+        showlegend=True,
+        legend_title='Variables',
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=1.02
+        ),
+        margin=dict(r=200)
+    )
+    
+    # Update x-axis with proper tick labels
+    fig.update_xaxes(
+        tickmode='array',
+        tickvals=[numeric_keys[r] for r in sorted_radii],
+        ticktext=[str(r) for r in sorted_radii]
+    )
+    
+    return fig
 
-    with st.expander(f'Partial correlation {target_cities}', expanded=False):
-        target_lu = st.selectbox('Select land-use target by radius',lu_cols)
-        df_part = utils.partial_corr(df=df_for_reg_normalized,cf_cols=cf_cols,corr_target=target_lu,covar=control_cols)
-        st.data_editor(df_part,use_container_width=True)
-        st.caption('https://pingouin-stats.org/build/html/generated/pingouin.partial_corr.html , https://en.wikipedia.org/wiki/Partial_correlation')
 
-    with st.expander(f'Sample data {target_cities}', expanded=False):    
-            st.data_editor(cfua_data_for_city.describe(),use_container_width=True)
-            csv_to_save = cfua_data_for_city.to_csv().encode('utf-8')
-            file_name = f"CFUA_{target_cities}.csv"
-            st.download_button(label="Save as CSV",
-                                data=csv_to_save,
-                                file_name=file_name,
-                                mime='text/csv')
+if target_cities:
+    lu_cols = [col for col in datac.columns if col.startswith('lu')]
+    radius_dfs = gen_regs_for_plot(data=datac,
+                                   target_col=target_col,
+                                   base_cols=base_cols,
+                                   cat_cols=cat_cols,
+                                   lu_cols=lu_cols,
+                                   control_cols=[control_col],
+                                   p_limit=False)
+    fig = plot_ext_r_across_radii(radius_dfs,regions=target_cities, target_domain=target_col, p_value_threshold=0.07)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+with st.expander(f'Regression table {target_cities}', expanded=False):
+    p_filter = st.toggle('p-value filtering')
+    radius = st.radio('Radius of neighborhood in km',[1,3,5,9],horizontal=True)
+    df_r = datac[datac['R'] == f"R{radius}"]
+    reg_df = ols_reg_table(df_in=df_r,
+                            cf_col=target_col,
+                            base_cols=base_cols,
+                            cat_cols=cat_cols,
+                            ext_cols=lu_cols,
+                            control_cols=[control_col]
+                            )
+    
+    if p_filter:
+        reg_df = reg_df[reg_df['ext_p'] < 0.07]
+        p_limit = True
+
+    st.data_editor(reg_df,use_container_width=True, height=500)
+
+
