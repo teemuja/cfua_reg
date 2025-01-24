@@ -17,7 +17,7 @@ import plotly.express as px
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
 import json
-
+import utils
 #ML
 from scipy import stats
 import statsmodels.api as sm
@@ -94,15 +94,86 @@ with st.status('Connecting database..') as dbstatus:
         else:
             df_out = duckdb.sql(f"SELECT * FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_ND{R}km_no-sdi.parquet')").to_df().drop(columns=['__index_level_0__'])
         
-        return df_out.drop(columns="lu_other")
+        #fix
+        df_out['lu_recreational'] = df_out['lu_green_areas'] + df_out['lu_leisure_landuse']
+        df_out['lu_consumerism'] = df_out['lu_shopping_and_retail'] + df_out['lu_food_and_dining']
+        drop_cols = [
+            'Diet footprint',
+            'Pets footprint',
+            'Summer house footprint',
+            "lu_other",
+            "amenity_sdi",
+            "lu_facility_landuse",
+            'lu_leisure_landuse',
+            'lu_green_areas',
+            'lu_food_and_dining',
+            'lu_shopping_and_retail',
+            'Country'
+            ]
+        
+        cf_cols_to_use = [
+            'Housing footprint',
+            'Vehicle possession footprint',
+            'Public transportation footprint',
+            'Leisure travel footprint',
+            'Goods and services footprint',
+            'Total footprint',
+            'Total footprint unit',
+            ]
+
+        df_out.rename(columns={col: 'cf_' + col for col in cf_cols_to_use}, inplace=True)
+
+        return df_out.drop(columns=drop_cols)
 
 
     data = load_data()
     if st.toggle('Described'):
         st.data_editor(data.describe(),key="init_desc")
     else:
-        st.data_editor(data,key="init")
+        # agg_h3 = st.radio("Set aggregation h3-level",[None,9,8],horizontal=True)
+        # cf_cols = [col for col in data.columns if col.startswith('cf_')]
+        # mean_cols = [col for col in data.columns if col.startswith('lu')]
+        # mode_cols = [
+        #     'Education level',
+        #     'Household per capita income decile',
+        #     'Household unit income decile',
+        #     'Household type',
+        #     'Car in household',
+        #     'fua_name',
+        #     'R',
+        #     ]
+        # if agg_h3 is not None:
+        #     data_agg = pd.DataFrame()
+        #     for r in ['R1','R3','R5','R9']:
+        #         dfr = data[data['R'] == r]
+        #         dfr_agg = utils.agg_values(df_in=dfr,
+        #                                 cf_cols=cf_cols,
+        #                                 mean_cols=mean_cols,
+        #                                 mode_cols=mode_cols,
+        #                                 r=agg_h3)
+        #         data_agg = pd.concat([data_agg,dfr_agg])
 
+        #     data = data_agg.copy()
+            
+        st.caption(f"N {len(data)}")
+        st.data_editor(data,key="init")
+        #st.stop()
+        
+        @st.dialog("Download data")
+        def download(df):
+            r = st.radio("Select which neigborhood radius data to download",[1,3,5,9],horizontal=True)
+            dfr = df[df['R'] == f"R{1}"]
+            st.download_button(
+                                label=f"Download {r}km data as CSV",
+                                data=dfr.to_csv().encode("utf-8"),
+                                file_name=f"cfua_data_nordics_with_landuse_radius_{r}km.csv",
+                                mime="text/csv",
+                            )
+
+        if st.button('Download'):
+            download(df=data)
+    cf_cols = [col for col in data.columns if col.startswith('cf_')]
+    
     dbstatus.update(label="DB connected!", state="complete", expanded=False)
 
 def normalize_df(df_in,cols=None):
@@ -115,9 +186,7 @@ def normalize_df(df_in,cols=None):
 
 #@st.cache_data()
 def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols):
-
     df = normalize_df(df_in)
-
     def ols(df, cf_col, base_cols, cat_cols, ext_cols, control_cols):
         cat_cols_lower = [col.lower().replace(' ', '_') for col in cat_cols]
         
@@ -163,8 +232,7 @@ def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols):
 
 #reg_df = ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols)
 cities = data['fua_name'].unique().tolist()
-cf_cols = data.columns.tolist()[5:15]
-lu_cols_orig = [col for col in data.columns if col.startswith('lu')]
+lu_cols_in_use = [col for col in data.columns if col.startswith('lu')]
 base_cols = ['Household type', 'Car in household','Age']
 
 st1,st2 = st.columns(2)
@@ -175,18 +243,26 @@ else:
     st.stop()
 
 
-
 with st.expander(f'Reg.settings', expanded=True):
     s1,s2,s3 = st.columns(3)
-    target_col = s1.selectbox("Target domain",cf_cols,index=9) #last
+    target_col = s1.selectbox("Target domain",cf_cols,index=6) #last
     if target_col == "Total footprint unit":
         cat_cols = ['Household unit income decile', 'Household type', 'Car in household']
     else:
         cat_cols = ['Household per capita income decile', 'Household type', 'Car in household']
     control_col = s2.selectbox('Control column',cat_cols,index=0)
-    remove_cols = s3.multiselect('Remove landuse classes',lu_cols_orig)
+    remove_cols = s3.multiselect('Remove landuse classes',lu_cols_in_use)
     if remove_cols:
         datac.drop(columns=remove_cols, inplace=True)
+        norm_cols = list(set(cf_cols + lu_cols_in_use) - set(remove_cols))
+    else:
+        norm_cols = list(set(cf_cols + lu_cols_in_use))
+
+#normalice case data for reg
+datac = datac.dropna(subset=norm_cols)
+datac = normalize_df(datac,cols=norm_cols)
+#st.data_editor(datac)
+#st.stop()
 
 #@st.cache_data()
 def gen_regs_for_plot(data,
@@ -218,16 +294,7 @@ def gen_regs_for_plot(data,
     return radius_dfs
 
 def plot_ext_r_across_radii(dataframes_dict, regions, target_domain, p_value_threshold=0.07):
-    """
-    Create a line plot of ext_r values for different variables across multiple radii,
-    considering p-value threshold.
-    
-    Parameters:
-    dataframes_dict: dict
-        Dictionary with radius as key and DataFrame as value
-    p_value_threshold: float
-        Maximum p-value to consider a relationship significant (default: 0.05)
-    """
+
     # Convert radius keys to numeric values (removing 'R' prefix if exists)
     numeric_keys = {}
     for k in dataframes_dict.keys():
@@ -317,6 +384,7 @@ if target_cities:
                                    lu_cols=lu_cols,
                                    control_cols=[control_col],
                                    p_limit=False)
+    
     fig = plot_ext_r_across_radii(radius_dfs,regions=target_cities, target_domain=target_col, p_value_threshold=0.07)
     st.plotly_chart(fig, use_container_width=True)
 

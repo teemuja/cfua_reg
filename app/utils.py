@@ -417,46 +417,46 @@ def count_landuse_types_in_nd(df_in, r, lu_dict):
     return df_out
 
 
-def cluster_and_aggregate(df, mean_cols, mode_cols, landuse_col, lu_dict, target_resolution):
-    """
-    Clusters nearby hexagons with carbon footprint values and aggregates data.
-    https://uber.github.io/h3-py/api_verbose.html#h3.cell_to_parent
-    Parameters:
-    - df: DataFrame containing H3 hexagon indexes at resolution 10 and other feature columns.
-    - cf_col: Column containing carbon footprint values to identify relevant hexagons.
-    - mean_cols: List of columns to aggregate using mean.
-    - sum_cols: List of columns to aggregate using sum.
-    - target_resolution: Higher H3 resolution level for clustering (e.g., 9).
+def agg_values(df_in,cf_cols,mean_cols,mode_cols,r):
 
-    Returns:
-    - DataFrame with aggregated values at higher-level H3 resolution.
-    """
-    if target_resolution <= 9:
-        # Filter hexagons with carbon footprint data and replace landuse class names
-        cf_hexas = df.dropna(subset=["Total footprint"]).replace({'landuse_class': lu_dict})
+    #drop_cols_when_use_clustering = ['Car in household','Number of persons in household','Urban degree','Country']
+    df = df_in.copy() #.drop(columns=drop_cols_when_use_clustering)
 
-        # Get higher-level hex ID for clustering
-        cf_hexas['parent_hex'] = cf_hexas["h3_10"].apply(lambda x: h3.cell_to_parent(x, target_resolution))
+    #when h3py in use..
+    df[f'h3_0{r}'] = df["h3_10"].apply(lambda x: h3.cell_to_parent(x, r))
+    #when h3pandas in use..
+    #df = df.set_index("h3_10").h3.h3_to_parent(r).reset_index()
+    
+    agg_dict = {}
+    agg_dict.update({col: 'median' for col in cf_cols})
+    agg_dict.update({col: 'mean' for col in mean_cols})
+    agg_dict.update({col: lambda x: x.mode()[0] if not x.mode().empty else None for col in mode_cols})
 
-        # Aggregate mean columns
-        mean_agg = cf_hexas.groupby('parent_hex')[mean_cols].mean()
+    # Perform the grouped aggregation
+    aggregated_df = df.groupby(f'h3_0{r}').agg(agg_dict).reset_index()
+    
+    # ----- Add new 10 level id using centers of aggregated cells ----
 
-        # Aggregate mode (most common) for categorical columns
-        mode_agg = cf_hexas.groupby('parent_hex')[mode_cols].agg(lambda x: x.mode()[0] if not x.mode().empty else None)
+    #when h3py in use..
+    #aggregated_df['h3_center_child'] = aggregated_df[f'h3_0{r}'].apply(lambda x: h3.cell_to_center_child(x, 10))
+    #when h3pandas in use..
+    #aggregated_df = aggregated_df.set_index(f'h3_0{r}').h3.h3_to_center_child(10).reset_index()
+    
+    #aggregated_df.rename(columns={'h3_center_child':'h3_10'},inplace=True)
 
-        # Count occurrences of each land-use class and pivot into separate columns
-        landuse_counts = (cf_hexas.groupby(['parent_hex', landuse_col])
-                        .size()
-                        .unstack(fill_value=0)
-                        .add_prefix('lu_'))
+    # round all
+    all_agg_cols = cf_cols + mean_cols + mode_cols
+    for col in all_agg_cols:
+        df[col] = 0
 
-        # Combine all aggregated data
-        aggregated_df = mean_agg.join(mode_agg).join(landuse_counts).reset_index()
-        aggregated_df.rename(columns={'parent_hex': f'h3_0{target_resolution}'}, inplace=True)
+    aggregated_df[all_agg_cols] = aggregated_df[all_agg_cols].round(0)
+    cols = aggregated_df.columns.tolist()
+    cols = [cols[-1]] + cols[:-1]
+    aggregated_df = aggregated_df[cols]
 
-        df_out = aggregated_df[aggregated_df['Total footprint'] != 0]
-        
-    return df_out
+    return aggregated_df
+
+
 
 @st.cache_data(max_entries=1) #@st.fragment()
 def aggregation(df,nd_size_km,cluster_reso,retail_categories,lu_dict):
