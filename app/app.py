@@ -17,7 +17,7 @@ import plotly.express as px
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
 import json
-import utils
+
 #ML
 from scipy import stats
 import statsmodels.api as sm
@@ -165,6 +165,7 @@ with st.status('Connecting database..') as dbstatus:
     if st.button('Download'):
         download(df=data)
 
+    st.table(lu_cols_map)
     dbstatus.update(label="DB connected!", state="complete", expanded=False)
 
 #st.stop()
@@ -388,6 +389,18 @@ with st.expander(f'Regression plot {target_cities}', expanded=False):
         # Create figure
         fig = go.Figure()
         
+        custom_color_map = {
+                            "lu_facility": "violet",
+                            "lu_modern": "brown",
+                            "lu_suburb": "burlywood",
+                            "lu_exurb":"palegoldenrod",
+                            "lu_urban":"red",
+                            "lu_leisure":"orange",
+                            "lu_open":"skyblue",
+                            "lu_green": "olive",
+                            "lu_forest":"darkgreen",
+                        }
+        
         # Process data for each variable
         for var in all_variables:
             y_values = []
@@ -413,6 +426,7 @@ with st.expander(f'Regression plot {target_cities}', expanded=False):
                     y=y_values,
                     name=var,
                     mode='lines+markers',
+                    line=dict(color=custom_color_map.get(var, 'gray')),
                     hovertemplate=(
                         'Radius: %{text}<br>' +
                         'ext_r: %{y:.3f}<br>' +
