@@ -298,26 +298,47 @@ def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols):
 
 with st.expander('Case cities', expanded=False):
     cities = data['fua_name'].unique().tolist()
-    lu_cols_in_use = [col for col in data.columns if col.startswith('lu')]
+    
     st1,st2 = st.columns(2)
     target_cities = st1.multiselect("Set sample regions",cities,default=["Helsinki","Stockholm"])
     datac = data[data['fua_name'].isin(target_cities)]
+    lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
     st.data_editor(datac.describe())
 
 if target_cities:
-    with st.expander(f'Reg.settings', expanded=True):
+    with st.expander(f'Regression settings', expanded=True):
         s1,s2,s3 = st.columns(3)
-        target_col = s1.selectbox("Target domain",cf_cols,index=0)
+        target_col = s1.selectbox("Target domain",cf_cols,index=5)
         base_cols = ['Age','Education level','Household type','Car in household']
         if target_col == "cf_Total footprint unit":
             cat_cols = ['Household unit income decile', 'Household type', 'Car in household']
         else:
             cat_cols = ['Household per capita income decile', 'Household type', 'Car in household']
         control_col = s2.selectbox('Control column',cat_cols,index=0)
+
+        #reclassification
+
+        combine_cols1 = s1.multiselect('Combine landuse classes',lu_cols_in_use)
+        if len(combine_cols1) > 1:
+            new_col_name = "_".join(combine_cols1)
+            datac[new_col_name] = datac[combine_cols1].sum(axis=1)
+            datac.drop(columns=combine_cols1, inplace=True)
+            lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+            #another comb set
+            combine_cols2 = s2.multiselect('Combine landuse classes',lu_cols_in_use)
+            if len(combine_cols2) > 1:
+                new_col_name2 = "_".join(combine_cols2)
+                datac[new_col_name2] = datac[combine_cols2].sum(axis=1)
+                datac.drop(columns=combine_cols2, inplace=True)
+                lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+
         remove_cols = s3.multiselect('Remove landuse classes',lu_cols_in_use)
         if remove_cols:
             datac.drop(columns=remove_cols, inplace=True)
+            
 
+        st.info("E.g. Remove 'lu_open' and combine 'lu_exurb' with 'lu_suburb' ..and/or 'lu_facility' with 'lu_leisure'")
+    #st.data_editor(datac)
 
     with st.expander(f'Regression table {target_cities}', expanded=False):
         radius = st.radio('Radius of neighborhood in km',[1,5,9],horizontal=True)
@@ -338,7 +359,8 @@ else:
 
 
 with st.expander(f'Regression plot {target_cities}', expanded=False):
-    p_limit = st.toggle('Show only significant values')
+    c1,c2 =st.columns(2)
+    p_value_thres = c1.slider('P-value filter',0.01,0.2,0.09,step=0.01)
     def gen_regs_for_plot(data,
                         target_col,
                         base_cols,
@@ -470,10 +492,6 @@ with st.expander(f'Regression plot {target_cities}', expanded=False):
                                     lu_cols=lu_cols_plot,
                                     control_cols=[control_col],
                                     p_limit=False)
-    if p_limit:
-        p_value_thres = 0.07
-    else:
-        p_value_thres = 0.5
 
     fig = plot_ext_r_across_radii(radius_dfs,regions=target_cities, target_domain=target_col, p_value_threshold=p_value_thres)
     st.plotly_chart(fig, use_container_width=True)
