@@ -8,7 +8,6 @@ from shapely import wkt
 from shapely.geometry import MultiPoint, Point
 import math
 import geocoder
-from sklearn.cluster import DBSCAN
 import duckdb
 import requests
 import io
@@ -20,6 +19,7 @@ import json
 
 #ML
 from scipy import stats
+from scipy.stats import yeojohnson
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
@@ -151,10 +151,18 @@ with st.status('Connecting database..') as dbstatus:
     @st.dialog("Download data")
     def download(df):
         cities = df['fua_name'].unique().tolist()
-        c = st.selectbox('Select case city',cities)
-        r = st.radio("Select which neigborhood radius data to download",[1,5,9],horizontal=True)
-        dfc = df[df['fua_name'] == c]
-        dfr = dfc[dfc['R'] == f"R{1}"]
+        c = st.selectbox('Select case city',cities + ["All"])
+        r = st.radio("Select which neigborhood radius data to download",[1,5,9,"all"],horizontal=True)
+        if c != "All":
+            dfc = df[df['fua_name'] == c]
+        else:
+            dfc = df.copy()
+        if r != "all":
+            dfr = dfc[dfc['R'] == f"R{r}"]
+        else:
+            dfr = dfc.copy()
+            del dfc
+        
         st.download_button(
                             label=f"Download {c} {r}km data as CSV",
                             data=dfr.to_csv().encode("utf-8"),
@@ -172,6 +180,7 @@ with st.status('Connecting database..') as dbstatus:
 
 
 def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, control_cols):
+    
     def normalize_df(df_in,cols=None):
         df = df_in.copy()
         if cols is None:
@@ -335,24 +344,93 @@ if target_cities:
         remove_cols = s3.multiselect('Remove landuse classes',lu_cols_in_use)
         if remove_cols:
             datac.drop(columns=remove_cols, inplace=True)
-            
-
         st.info("E.g. Remove 'lu_open' and combine 'lu_exurb' with 'lu_suburb' ..and/or 'lu_facility' with 'lu_leisure'")
+        
+        lu_cols = [col for col in datac.columns if col.startswith('lu')]
+        power_trans = st.toggle("Use power transformation",help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
+        if power_trans:
+            for radius in [1,5,9]:
+                df_r = datac[datac['R'] == f"R{radius}"]
+                transformed_values = {}
+                for col in lu_cols:
+                    df_r[col], lam = yeojohnson(df_r[col])
+                    transformed_values[col] = df_r[col]
+
+                # Update datac with transformed values for pearson later in the code..
+                datac.loc[datac['R'] == f"R{radius}", lu_cols] = df_r[lu_cols]
+
+        #plot histos
+        yks,viis,ysi = st.tabs(['1km','5km','9km'])
+        with yks:
+            histo_traces = []
+            df_r = datac[datac['R'] == f"R1"]
+            for col in lu_cols:
+                histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
+                histo_traces.append(histo)
+            layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
+            histo_fig = go.Figure(data=histo_traces, layout=layout_histo)
+            st.plotly_chart(histo_fig, use_container_width=True,key=yks)
+        with viis:
+            histo_traces = []
+            df_r = datac[datac['R'] == f"R5"]
+            for col in lu_cols:
+                histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
+                histo_traces.append(histo)
+            layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
+            histo_fig = go.Figure(data=histo_traces, layout=layout_histo)
+            st.plotly_chart(histo_fig, use_container_width=True,key=viis)
+        with ysi:
+            histo_traces = []
+            df_r = datac[datac['R'] == f"R9"]
+            for col in lu_cols:
+                histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
+                histo_traces.append(histo)
+            layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
+            histo_fig = go.Figure(data=histo_traces, layout=layout_histo)
+            st.plotly_chart(histo_fig, use_container_width=True,key=ysi)
+
     #st.data_editor(datac)
 
-    with st.expander(f'Regression table {target_cities}', expanded=False):
-        radius = st.radio('Radius of neighborhood in km',[1,5,9],horizontal=True)
-        df_r = datac[datac['R'] == f"R{radius}"]
-        r_lu_cols = [col for col in df_r.columns if col.startswith('lu')]
-        reg_df = ols_reg_table(df_in=df_r.fillna(0),
-                                cf_col=target_col,
-                                base_cols=base_cols,
-                                cat_cols=cat_cols,
-                                ext_cols=r_lu_cols,
-                                control_cols=[control_col]
-                                )
+    with st.expander(f'Regression tables {target_cities}', expanded=False):
 
-        st.data_editor(reg_df,use_container_width=True, height=500)
+        yksi,viisi,yhdeksan = st.tabs(['1km','5km','9km'])
+        with yksi:
+            df_r = datac[datac['R'] == f"R1"]
+            #table for r
+            r_lu_cols = [col for col in df_r.columns if col.startswith('lu')]
+            reg_df = ols_reg_table(df_in=df_r.fillna(0),
+                                    cf_col=target_col,
+                                    base_cols=base_cols,
+                                    cat_cols=cat_cols,
+                                    ext_cols=r_lu_cols,
+                                    control_cols=[control_col]
+                                    )
+            st.data_editor(reg_df,use_container_width=True, height=500,key=yksi)
+        with viisi:
+            df_r = datac[datac['R'] == f"R5"]
+            #table for r
+            r_lu_cols = [col for col in df_r.columns if col.startswith('lu')]
+            reg_df = ols_reg_table(df_in=df_r.fillna(0),
+                                    cf_col=target_col,
+                                    base_cols=base_cols,
+                                    cat_cols=cat_cols,
+                                    ext_cols=r_lu_cols,
+                                    control_cols=[control_col]
+                                    )
+            st.data_editor(reg_df,use_container_width=True, height=500,key=viisi)
+        with yhdeksan:
+            df_r = datac[datac['R'] == f"R9"]
+            #table for r
+            r_lu_cols = [col for col in df_r.columns if col.startswith('lu')]
+            reg_df = ols_reg_table(df_in=df_r.fillna(0),
+                                    cf_col=target_col,
+                                    base_cols=base_cols,
+                                    cat_cols=cat_cols,
+                                    ext_cols=r_lu_cols,
+                                    control_cols=[control_col]
+                                    )
+            st.data_editor(reg_df,use_container_width=True, height=500,key=yhdeksan)
+
 
 else:
     st.stop()
