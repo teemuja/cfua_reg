@@ -326,7 +326,6 @@ if target_cities:
         control_col = s2.selectbox('Control column',cat_cols,index=0)
 
         #reclassification
-
         combine_cols1 = s1.multiselect('Combine landuse classes',lu_cols_in_use)
         if len(combine_cols1) > 1:
             new_col_name = "_".join(combine_cols1)
@@ -347,8 +346,11 @@ if target_cities:
         st.info("E.g. Remove 'lu_open' and combine 'lu_exurb' with 'lu_suburb' ..and/or 'lu_facility' with 'lu_leisure'")
         
         lu_cols = [col for col in datac.columns if col.startswith('lu')]
-        power_trans = st.toggle("Use power transformation",help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
-        if power_trans:
+        st.markdown("---")
+        power_lu = st.toggle("Power transform land-use distribution",help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
+        power_cf = st.toggle("Power transform footprint distribution",help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
+        
+        if power_lu:
             for radius in [1,5,9]:
                 df_r = datac[datac['R'] == f"R{radius}"]
                 transformed_values = {}
@@ -358,18 +360,30 @@ if target_cities:
 
                 # Update datac with transformed values for pearson later in the code..
                 datac.loc[datac['R'] == f"R{radius}", lu_cols] = df_r[lu_cols]
+        
+        if power_cf:
+            for radius in [1,5,9]:
+                df_r = datac[datac['R'] == f"R{radius}"]
+                transformed_values = {}
+                for col in cf_cols:
+                    df_r[col], lam = yeojohnson(df_r[col])
+                    transformed_values[col] = df_r[col]
+
+                # Update datac with transformed values for pearson later in the code..
+                datac.loc[datac['R'] == f"R{radius}", cf_cols] = df_r[cf_cols]
 
         #plot histos
-        yks,viis,ysi = st.tabs(['1km','5km','9km'])
+        yks,viis,ysi,cf = st.tabs(['1km','5km','9km','CF domains'])
+ 
         with yks:
-            histo_traces = []
+            histo_traces_lu = []
             df_r = datac[datac['R'] == f"R1"]
             for col in lu_cols:
                 histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
-                histo_traces.append(histo)
+                histo_traces_lu.append(histo)
             layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
-            histo_fig = go.Figure(data=histo_traces, layout=layout_histo)
-            st.plotly_chart(histo_fig, use_container_width=True,key=yks)
+            histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
+            st.plotly_chart(histo_fig_lu, use_container_width=True)
         with viis:
             histo_traces = []
             df_r = datac[datac['R'] == f"R5"]
@@ -388,6 +402,15 @@ if target_cities:
             layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
             histo_fig = go.Figure(data=histo_traces, layout=layout_histo)
             st.plotly_chart(histo_fig, use_container_width=True,key=ysi)
+        with cf:
+            histo_traces_cf = []
+            df_r = datac[datac['R'] == f"R1"]
+            for col in cf_cols:
+                histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
+                histo_traces_cf.append(histo)
+            layout_histo = go.Layout(title='CF domain histograms',barmode='overlay')
+            histo_fig_cf = go.Figure(data=histo_traces_cf, layout=layout_histo)
+            st.plotly_chart(histo_fig_cf, use_container_width=True)
 
     #st.data_editor(datac)
 
@@ -495,9 +518,11 @@ with st.expander(f'Regression plot {target_cities}', expanded=False):
                             "lu_suburb": "burlywood",
                             "lu_exurb":"palegoldenrod",
                             "lu_urban":"red",
+                            "lu_urban_lu_modern":"red",
                             "lu_leisure":"orange",
                             "lu_open":"skyblue",
                             "lu_green": "olive",
+                            "lu_green_lu_leisure":"olive",
                             "lu_forest":"darkgreen",
                         }
         
@@ -540,6 +565,7 @@ with st.expander(f'Regression plot {target_cities}', expanded=False):
         fig.update_layout(
             title=f"Correlation between '{target_domain}' and landuse types in {regions}",
             xaxis_title='Radius (km)',
+            yaxis_range=[-0.5,0.5],
             yaxis_title='ext_r Value',
             hovermode='x unified',
             showlegend=True,
