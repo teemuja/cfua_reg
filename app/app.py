@@ -79,18 +79,20 @@ with st.status('Connecting database..') as dbstatus:
             combined_table = f"""
                     DROP TABLE IF EXISTS combined_table;
                     CREATE TABLE combined_table AS 
-                    SELECT *, 'R1' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND1km.parquet')
+                    SELECT *, 'R1' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND1km_F.parquet')
                     UNION ALL
-                    SELECT *, 'R5' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND5km.parquet')
+                    SELECT *, 'R5' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND5km_F.parquet')
                     UNION ALL
-                    SELECT *, 'R9' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND9km.parquet')
+                    SELECT *, 'R9' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND9km_F.parquet')
                 """
             duckdb.sql(combined_table)
-            df = duckdb.sql("SELECT * FROM combined_table").to_df().drop(columns=['__index_level_0__'])
+            dropcols = ['__index_level_0__']
+            df = duckdb.sql("SELECT * FROM combined_table").to_df()#.drop(columns=dropcols)
+            
             cols = ['R'] + [col for col in df.columns if col != 'R']
             df_out = df[cols]
         else:
-            df_out = duckdb.sql(f"SELECT * FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND{R}km.parquet')").to_df().drop(columns=['__index_level_0__'])
+            df_out = duckdb.sql(f"SELECT * FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND{R}km_F.parquet')").to_df().drop(columns=['__index_level_0__'])
         
         cf_cols = ['Housing footprint',
                 'Diet footprint',
@@ -318,12 +320,13 @@ if target_cities:
     with st.expander(f'Regression settings', expanded=True):
         s1,s2,s3 = st.columns(3)
         target_col = s1.selectbox("Target domain",cf_cols,index=5)
-        base_cols = ['Age','Education level','Household type','Car in household']
+        #base_cols = ['Age','Education level','Household type','Car in household']
         if target_col == "cf_Total footprint unit":
-            cat_cols = ['Household unit income decile', 'Household type', 'Car in household']
+            base_cols = ['Age','Education level','Household type','Car in household','Household unit income decile ORIG']
         else:
-            cat_cols = ['Household per capita income decile', 'Household type', 'Car in household']
-        control_col = s2.selectbox('Control column',cat_cols,index=0)
+            base_cols = ['Age','Education level','Household type','Car in household','Household per capita income decile ORIG']
+        cat_cols = ['Household type', 'Car in household']
+        control_col = s2.selectbox('Control column',base_cols,index=4)
 
         #reclassification
         combine_cols1 = s1.multiselect('Combine landuse classes',lu_cols_in_use)
