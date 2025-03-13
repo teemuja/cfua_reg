@@ -115,10 +115,13 @@ with st.status('Connecting database..') as dbstatus:
         lu_cols_orig = [col for col in df_out.columns if col.startswith('lu_')]
         df_out.rename(columns={col: col.replace('lu_lu_', 'lu_') for col in lu_cols_orig}, inplace=True)
 
-        #add age group
-        #df_out.loc[df_out['Age'] < 25, "Age group"] = 0
-        #df_out.loc[df_out['Age'] >= 25, "Age group"] = 1
-        #df_out.loc[df_out['Age'] >= 50, "Age group"] = 2
+        #Make country num
+        df_out.loc[df_out['Country'] == "FI", 'Country'] = 0
+        df_out.loc[df_out['Country'] == "SE", 'Country'] = 1
+        df_out.loc[df_out['Country'] == "DK", 'Country'] = 2
+        df_out.loc[df_out['Country'] == "NO", 'Country'] = 3
+        df_out.loc[df_out['Country'] == "IS", 'Country'] = 4
+
         #drop cols
         df_out.drop(columns=["landuse_class","Urban degree","Number of persons in household"],inplace=True)
 
@@ -367,12 +370,12 @@ if target_cities:
         
         #multiselect cat cols to use = control
         base_cols_orig = ['Age']
-        control_cols = s2.multiselect('Control columns',con_cols_to_choose, default=["Country",con_cols_to_choose[4]])
+        control_cols = s2.multiselect('Control columns',con_cols_to_choose, default=["Country","Household type",con_cols_to_choose[4]])
 
         #reclassification
         s1,s2,s3 = st.columns(3)
 
-        remove_cols = s1.multiselect('Remove landuse classes',lu_cols_in_use, default='lu_open')
+        remove_cols = s1.multiselect('Remove landuse classes',lu_cols_in_use, default=['lu_open','lu_forest'])
         if remove_cols:
             datac.drop(columns=remove_cols, inplace=True)
 
@@ -425,7 +428,7 @@ if target_cities:
 
                 # Update each column in lu_cols
                 for col in lu_cols:
-                    df_r[col] = round(df_r[col] / max_hex, 3)
+                    df_r[col] = round(df_r[col].fillna(0) / max_hex, 3)
 
                 # Push the updated data back into the main DataFrame
                 datac.loc[datac['R'] == f"R{radius}", lu_cols] = df_r[lu_cols].values
@@ -482,7 +485,7 @@ if target_cities:
             #table for r
             r1_lu_cols = [col for col in df_r1.columns if col.startswith('lu')]
 
-            reg_df1, base_results, ext_results = ols_reg_table(df_in=df_r.fillna(0),
+            reg_df1, base_results, ext_results = ols_reg_table(df_in=df_r1.fillna(0),
                                     cf_col=target_col,
                                     base_cols=base_cols_orig + control_cols,
                                     cat_cols=cat_cols,
@@ -497,7 +500,7 @@ if target_cities:
             df_r5 = datac[datac['R'] == f"R5"]
             #table for r
             r5_lu_cols = [col for col in df_r5.columns if col.startswith('lu')]
-            reg_df5, base_results, ext_results = ols_reg_table(df_in=df_r.fillna(0),
+            reg_df5, base_results, ext_results = ols_reg_table(df_in=df_r5.fillna(0),
                                     cf_col=target_col,
                                     base_cols=base_cols_orig + control_cols,
                                     cat_cols=cat_cols,
@@ -510,7 +513,7 @@ if target_cities:
             df_r9 = datac[datac['R'] == f"R9"]
             #table for r
             r9_lu_cols = [col for col in df_r9.columns if col.startswith('lu')]
-            reg_df9, base_results, ext_results = ols_reg_table(df_in=df_r.fillna(0),
+            reg_df9, base_results, ext_results = ols_reg_table(df_in=df_r9.fillna(0),
                                     cf_col=target_col,
                                     base_cols=base_cols_orig + control_cols,
                                     cat_cols=cat_cols,
@@ -675,11 +678,12 @@ with st.expander(f'Regression change plot {target_cities}', expanded=False):
         reg_df_all = pd.concat([reg_df1,reg_df5,reg_df9])
         setup = [f'Cluster_level:{cluster}',f'Min_cluster_size:{min_cluster_size}',
                  f'lu_shares: {use_shares}',f'Standardize: {standardize}',
-                 f'lu_power_transformed: {power_lu}', f'cf_power_transformed: {power_cf}']
+                 f'lu_power_transformed: {power_lu}', f'cf_power_transformed: {power_cf}',
+                 f'N={len(datac)}']
         st.download_button(
                             label=f"Download study as CSV",
                             data=reg_df_all.to_csv().encode("utf-8"),
-                            file_name=f"cfua_data_{target_col}_{target_cities}_{setup}.csv",
+                            file_name=f"cfua_data_{target_col}_{control_cols}_{target_cities}_{setup}.csv",
                             mime="text/csv",
                             )
         
