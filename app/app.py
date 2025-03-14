@@ -132,7 +132,6 @@ with st.status('Connecting database..') as dbstatus:
     cf_cols = [col for col in data.columns if col.startswith('cf_')]
     lu_cols_orig = [col for col in data.columns if col.startswith('lu_')]
     lu_cols_map = {
-        "lu_other":"lu_other",
         "lu_Forests":"lu_forest",
         "lu_Discontinuous very low density urban fabric":"lu_exurb",
         "lu_Continuous urban fabric":"lu_urban",
@@ -349,6 +348,16 @@ def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, standardize=True
             'ext_r': round(ext_results.params, rounder),
             'ext_p': round(ext_results.pvalues, rounder)
             })
+        
+        r2_row = pd.DataFrame({
+            'base_r': [round(base_results.rsquared_adj, rounder)],
+            'base_p': [None],
+            'ext_r': [round(ext_results.rsquared_adj, rounder)],
+            'ext_p': [None]
+        }, index=["rsqr_adj"])
+
+        # Concatenate the results with the rsqr_adj row
+        reg_results = pd.concat([r2_row,reg_results])
         
         #return all
         return reg_results, base_results, ext_results
@@ -586,8 +595,8 @@ with st.expander(f'Regression change plot {target_cities}', expanded=False):
                             "lu_facilities": "violet",
                             "lu_modern": "brown",
                             "lu_suburb": "burlywood",
-                            "lu_exurb":"palegoldenrod",
-                            "lu_urban":"darkred",
+                            "lu_exurb":"goldenrod",
+                            "lu_urban":"red",
                             "lu_urban_lu_modern":"red",
                             "lu_sports":"orange",
                             "lu_open":"skyblue",
@@ -688,6 +697,50 @@ with st.expander(f'Regression change plot {target_cities}', expanded=False):
                             )
         
     gen_reg_df_all()
+
+
+
+
+with st.expander(f'**Partial corr** on {target_col} in {target_cities}, N={len(datac)}', expanded=False):
+    import pingouin as pg
+    st.caption("https://pingouin-stats.org/build/html/generated/pingouin.partial_corr.html#pingouin.partial_corr")
+    expl = """
+        "A regular correlation (pearsonr) between landuse type and target carbon_footprint might be misleading 
+        if control variables affect both. Partial correlation "removes" the influence of control variables to check 
+        if each landuse type still correlates with selected carbon_footprint on its own."
+    """
+    st.caption(expl)
+
+    one,five,nine = st.tabs(['1km','5km','9km'])
+    with one:
+        dfr1 = datac[datac['R'] == f"R1"]
+        lu_cols_in_use1 = [col for col in dfr1.columns if col.startswith('lu')]
+        results_list = []
+        for land_use in lu_cols_in_use1:
+            result = pg.partial_corr(data=dfr1, x=land_use, y=target_col, covar=control_cols).assign(land_use=land_use)
+            results_list.append(result)
+        results_df1 = pd.concat(results_list, ignore_index=True)
+        st.data_editor(results_df1)
+    with five:
+        dfr5 = datac[datac['R'] == f"R5"]
+        lu_cols_in_use5 = [col for col in dfr5.columns if col.startswith('lu')]
+        results_list = []
+        for land_use in lu_cols_in_use5:
+            result = pg.partial_corr(data=dfr5, x=land_use, y=target_col, covar=control_cols).assign(land_use=land_use)
+            results_list.append(result)
+        results_df5 = pd.concat(results_list, ignore_index=True)
+        st.data_editor(results_df5)
+    with nine:
+        dfr9 = datac[datac['R'] == f"R9"]
+        lu_cols_in_use9 = [col for col in dfr9.columns if col.startswith('lu')]
+        results_list = []
+        for land_use in lu_cols_in_use9:
+            result = pg.partial_corr(data=dfr9, x=land_use, y=target_col, covar=control_cols).assign(land_use=land_use)
+            results_list.append(result)
+        results_df9 = pd.concat(results_list, ignore_index=True)
+        st.data_editor(results_df9)
+
+
 
 
 
