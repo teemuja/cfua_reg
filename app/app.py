@@ -1,29 +1,22 @@
 # NDP app always beta a lot
 import streamlit as st
 import pandas as pd
-import geopandas as gpd
 import h3
 import numpy as np
-from shapely import wkt
-from shapely.geometry import MultiPoint, Point
-import math
-import geocoder
 import duckdb
-import requests
-import io
-import re
 import plotly.express as px
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
-import json
 
-#ML
+#stats
 from scipy import stats
 from scipy.stats import yeojohnson
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
+from scipy.stats import pearsonr, spearmanr
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from scipy.stats import mode
+import pingouin as pg
 
 
 px.set_mapbox_access_token(st.secrets['mapbox']['MAPBOX_TOKEN'])
@@ -276,7 +269,77 @@ with st.expander('Case cities & Clusters', expanded=False):
     if st.button('Download'):
         download(df=datac)
 
-def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, standardize=True):
+
+## ------- combined reg study ---------
+
+target_col = st.selectbox("Target domain",cf_cols,index=5)
+
+with st.expander(f'Regression settings', expanded=True):
+
+    #base cols
+    if target_col == "cf_Total footprint unit":
+        con_cols_to_choose = ['Country','Education level','Household type','Car in household','Household unit income decile ORIG']
+    else:
+        con_cols_to_choose = ['Country','Education level','Household type','Car in household','Household per capita income decile ORIG']
+    
+    #multiselect cat cols to use = control
+    base_cols_orig = ['Age']
+    control_cols = st.multiselect('Control columns',con_cols_to_choose, default=["Country","Household type",con_cols_to_choose[4]])
+
+    st.markdown("---")
+    remove_cols = st.multiselect('Remove landuse classes',lu_cols_in_use, default=['lu_open','lu_facilities'])
+    if remove_cols:
+        datac.drop(columns=remove_cols, inplace=True)
+        lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+
+    #reclassification
+    s1,s2,s3,s4 = st.columns(4)
+    combine_cols1 = s1.multiselect('Combine landuse classes',lu_cols_in_use)
+    if len(combine_cols1) > 1:
+        new_col_name = "_".join(combine_cols1)
+        datac[new_col_name] = datac[combine_cols1].sum(axis=1)
+        datac.drop(columns=combine_cols1, inplace=True)
+        lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+        
+        #..add another comb set
+        combine_cols2 = s2.multiselect('..Combine more',lu_cols_in_use)
+        if len(combine_cols2) > 1:
+            new_col_name2 = "_".join(combine_cols2)
+            datac[new_col_name2] = datac[combine_cols2].sum(axis=1)
+            datac.drop(columns=combine_cols2, inplace=True)
+            lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+
+            #..add another comb set
+            combine_cols3 = s3.multiselect('..Combine more',lu_cols_in_use)
+            if len(combine_cols3) > 1:
+                new_col_name3 = "_".join(combine_cols3)
+                datac[new_col_name3] = datac[combine_cols3].sum(axis=1)
+                datac.drop(columns=combine_cols3, inplace=True)
+                lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+
+                #..add another comb set
+                combine_cols4 = s4.multiselect('..Combine more',lu_cols_in_use)
+                if len(combine_cols4) > 1:
+                    new_col_name4 = "_".join(combine_cols4)
+                    datac[new_col_name4] = datac[combine_cols4].sum(axis=1)
+                    datac.drop(columns=combine_cols4, inplace=True)
+                    lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+
+    lu_cols = [col for col in datac.columns if col.startswith('lu')]
+
+    s1,s2,s3 = st.columns(3)
+    power_lucf = s1.toggle("Power transform distribution",value=True,
+                           help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
+    standardize = False #s2.toggle("Standardize instead of normalize")
+
+    if power_lucf:
+        for radius in [1,5,9]:
+            df_r = datac[datac['R'] == f"R{radius}"]
+            for col in lu_cols + cf_cols:
+                df_r[col], lam = yeojohnson(df_r[col])
+            datac.loc[datac['R'] == f"R{radius}", lu_cols] = df_r[lu_cols]
+            datac.loc[datac['R'] == f"R{radius}", cf_cols] = df_r[cf_cols]
+
     
     def normalize_df(df_in,cols=None):
         df = df_in.copy()
@@ -285,7 +348,7 @@ def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, standardize=True
         for col in cols:
             df[col] = df[col] / df[col].abs().max()
         return df
-    
+        
     def standardize_df(df_in, cols=None):
         df = df_in.copy()
         if cols is None:
@@ -293,593 +356,272 @@ def ols_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols, standardize=True
         for col in cols:
             df[col] = (df[col] - df[col].mean()) / df[col].std()
         return df
-    
+
     do_not_norm_cols = cat_cols + feat_cols + ['h3_id']
-    cols_to_normalize = [col for col in df_in.columns if col not in do_not_norm_cols]
-
+    cols_to_normalize = [col for col in datac.columns if col not in do_not_norm_cols]
+    
     if standardize:
-        df = standardize_df(df_in,cols=cols_to_normalize)
+        datac = standardize_df(df_in=datac,cols=cols_to_normalize)
     else:
-        df = normalize_df(df_in,cols=cols_to_normalize)
+        datac = normalize_df(df_in=datac,cols=cols_to_normalize)
     
-    #actual OLS function
-    def ols(df, cf_col, base_cols, cat_cols, ext_cols):
+    #plot histos
+    yksi,viisi,yhdeksan,cf = st.tabs(['1km','5km','9km','CF'])
+    with yksi:
+        histo_traces_lu = []
+        df_r1 = datac[datac['R'] == f"R1"]
+        for col in lu_cols:
+            histo = go.Histogram(x=df_r1[col],opacity=0.75,name=col,nbinsx=20)
+            histo_traces_lu.append(histo)
+        layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
+        histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
+        st.plotly_chart(histo_fig_lu, use_container_width=True)
+    with viisi:
+        histo_traces_lu = []
+        df_r = datac[datac['R'] == f"R5"]
+        for col in lu_cols:
+            histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
+            histo_traces_lu.append(histo)
+        layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
+        histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
+        st.plotly_chart(histo_fig_lu, use_container_width=True)
+    with yhdeksan:
+        histo_traces_lu = []
+        df_r = datac[datac['R'] == f"R9"]
+        for col in lu_cols:
+            histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
+            histo_traces_lu.append(histo)
+        layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
+        histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
+        st.plotly_chart(histo_fig_lu, use_container_width=True)
 
-        #convert all cols lower in df..
-        df.columns = df.columns.str.lower().str.replace(' ', '_')
+    with cf:
+        histo_traces_cf = []
+        for col in cf_cols:
+            histo = go.Histogram(x=datac[col],opacity=0.75,name=col,nbinsx=20)
+            histo_traces_cf.append(histo)
+        layout_histo = go.Layout(title='CF domain histograms',barmode='overlay')
+        histo_fig_lu = go.Figure(data=histo_traces_cf, layout=layout_histo)
+        st.plotly_chart(histo_fig_lu, use_container_width=True)
 
-        #define cat cols as lower
-        cat_cols_lower = [col.lower().replace(' ', '_') for col in cat_cols]
-        
-        #func to format col for categorical C if listed above
-        def format_col(col):
-            col_lower = col.lower().replace(' ', '_').replace(',', '_').replace('&', '_')
-            return f'C({col_lower})' if col_lower in cat_cols_lower else col_lower
 
-        #make domain col also lower
-        domain_col = cf_col.lower().replace(' ', '_')
-        
-        #define strings for R -style formula
-        base_cols_str = ' + '.join([format_col(col) for col in base_cols])
-        ext_cols_str = ' + '.join([format_col(col) for col in ext_cols])
-        
-        base_formula = f'{domain_col} ~ {base_cols_str}'
-        ext_formula = f'{domain_col} ~ {base_cols_str} + {ext_cols_str}'
-        
-        try:
-            base_model = smf.ols(formula=base_formula, data=df)
-            base_results = base_model.fit()
-            ext_model = smf.ols(formula=ext_formula, data=df)
-            ext_results = ext_model.fit()
-            return base_results, ext_results
-        except Exception as e:
-            st.error(f"Regression failed: {e}")
-            return None, None
- 
-    #RUN ols
-    base_results, ext_results = ols(df, cf_col, base_cols, cat_cols, ext_cols)
 
-    #construct result df
-    rounder = 3
-    if base_results and ext_results:
-        reg_results = pd.DataFrame({
-            'base_r': round(base_results.params, rounder),
-            'base_p': round(base_results.pvalues, rounder),
-            'ext_r': round(ext_results.params, rounder),
-            'ext_p': round(ext_results.pvalues, rounder)
-            })
-        
-        r2_row = pd.DataFrame({
-            'base_r': [round(base_results.rsquared_adj, rounder)],
-            'base_p': [None],
-            'ext_r': [round(ext_results.rsquared_adj, rounder)],
-            'ext_p': [None]
-        }, index=["rsqr_adj"])
 
-        # Concatenate the results with the rsqr_adj row
-        reg_results = pd.concat([r2_row,reg_results])
+with st.expander(f'Regression tables', expanded=True):
+    st.caption('Method for pearson: https://www.statsmodels.org/stable/example_formulas.html')
+    st.caption('Method for partial spearman: https://pingouin-stats.org/build/html/generated/pingouin.partial_corr.html#pingouin.partial_corr')
+    st.caption("Distributions power transformed (and standardized) for all non-categorical variables using https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
+
+    def gen_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols):
         
-        #return all
-        return reg_results, base_results, ext_results
+        df_for_ols = df_in.copy()
+        df_for_partial = df_in.copy()
+
+        #OLS function
+        def ols(df, cf_col, base_cols, cat_cols, ext_cols):
+
+            df.columns = df.columns.str.lower().str.replace(' ', '_')
+            domain_col = cf_col.lower().replace(' ', '_')
+            cat_cols_lower = [col.lower().replace(' ', '_') for col in cat_cols]
+
+            def format_col(col):
+                col_lower = col.lower().replace(' ', '_').replace(',', '_').replace('&', '_')
+                return f'C({col_lower})' if col_lower in cat_cols_lower else col_lower
+
+            base_cols_str = ' + '.join([format_col(col) for col in base_cols])
+            ext_cols_str = ' + '.join([format_col(col) for col in ext_cols])
+
+            base_formula = f'{domain_col} ~ {base_cols_str}'
+            ext_formula = f'{domain_col} ~ {base_cols_str} + {ext_cols_str}'
+            
+            try:
+                base_model = smf.ols(formula=base_formula, data=df)
+                base_results = base_model.fit()
+                ext_model = smf.ols(formula=ext_formula, data=df)
+                ext_results = ext_model.fit()
+                return base_results, ext_results
+            except Exception as e:
+                st.error(f"Regression failed: {e}")
+                return None, None
     
-    else:
-        st.warning('Error in regression calculation. Probably needs more records. Change targets and settings.')
-        st.stop()
+        #RUN ols
+        base_results, ext_results = ols(df_for_ols, cf_col, base_cols, cat_cols, ext_cols)
 
-if target_cities:
-    with st.expander(f'Regression settings', expanded=True):
-        s1,s2 = st.columns([1,3])
-        target_col = s1.selectbox("Target domain",cf_cols,index=5)
-
-        #base cols
-        if target_col == "cf_Total footprint unit":
-            con_cols_to_choose = ['Country','Education level','Household type','Car in household','Household unit income decile ORIG']
-        else:
-            con_cols_to_choose = ['Country','Education level','Household type','Car in household','Household per capita income decile ORIG']
-        
-        #multiselect cat cols to use = control
-        base_cols_orig = ['Age']
-        control_cols = s2.multiselect('Control columns',con_cols_to_choose, default=["Country","Household type",con_cols_to_choose[4]])
-
-        #reclassification
-        s1,s2,s3 = st.columns(3)
-
-        remove_cols = s1.multiselect('Remove landuse classes',lu_cols_in_use, default=['lu_open','lu_forest'])
-        if remove_cols:
-            datac.drop(columns=remove_cols, inplace=True)
-
-        combine_cols1 = s2.multiselect('Combine landuse classes',lu_cols_in_use)
-        if len(combine_cols1) > 1:
-            new_col_name = "_".join(combine_cols1)
-            datac[new_col_name] = datac[combine_cols1].sum(axis=1)
-            datac.drop(columns=combine_cols1, inplace=True)
-            lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+        #construct result df
+        rounder = 3
+        if base_results and ext_results:
+            reg_results = pd.DataFrame({
+                'base_β': round(base_results.params, rounder),
+                'base_p': round(base_results.pvalues, rounder),
+                'ext_β': round(ext_results.params, rounder),
+                'ext_p': round(ext_results.pvalues, rounder)
+                })
             
-            #..add another comb set
-            combine_cols2 = s3.multiselect('..Combine more',lu_cols_in_use)
-            if len(combine_cols2) > 1:
-                new_col_name2 = "_".join(combine_cols2)
-                datac[new_col_name2] = datac[combine_cols2].sum(axis=1)
-                datac.drop(columns=combine_cols2, inplace=True)
-                lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+            r2_row = pd.DataFrame({
+                'base_β': [round(base_results.rsquared_adj, rounder)],
+                'base_p': [None],
+                'ext_β': [round(ext_results.rsquared_adj, rounder)],
+                'ext_p': [None]
+            }, index=["rsqr_adj"])
 
-        st.info("E.g. Remove 'lu_open' and combine 'lu_exurb' with 'lu_suburb' ..and/or 'lu_facility' with 'lu_leisure'")
+            # Concatenate the results with the rsqr_adj row
+            reg_results = pd.concat([r2_row,reg_results])
+
+            # Calculate partial correlations for each land-use type
+            partial_corr_results = []
+            for landuse in ext_cols:
+                partial_corr_result = pg.partial_corr(data=df_for_partial, x=landuse, y=cf_col, covar=control_cols, method="spearman")
+                partial_corr = round(partial_corr_result['r'].values[0],rounder)
+                partial_pval = round(partial_corr_result['p-val'].values[0],rounder)
+                partial_corr_results.append((landuse, partial_corr, partial_pval))
+
+            # Add partial correlation results to the DataFrame
+            partial_corr_df = pd.DataFrame(partial_corr_results, columns=['landuse', 'partial_r', 'partial_p'])
+            partial_corr_df.set_index('landuse', inplace=True)
+
+            # Merge partial correlation results with the regression results
+            reg_results = reg_results.join(partial_corr_df, how='outer')
+
+            return reg_results
+
+    yksi,viisi,yhdeksan = st.tabs(['1km','5km','9km'])
+    with yksi:
+        df_r1 = datac[datac['R'] == f"R1"]
         
-        lu_cols = [col for col in datac.columns if col.startswith('lu')]
+        #table for r
+        r1_lu_cols = [col for col in df_r1.columns if col.startswith('lu')]
 
-    with st.expander(f'Distribution settings', expanded=False):
-        use_shares = st.toggle('Use percents with land-use types')
-        standardize = st.toggle("Standardize instead of normalize")
-        power_lu = st.toggle("Power transform land-use distribution",help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
-        power_cf = st.toggle("Power transform footprint distribution",help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
-        
-        if power_lu:
-            for radius in [1,5,9]:
-                df_r = datac[datac['R'] == f"R{radius}"]
-                for col in lu_cols:
-                    df_r[col], lam = yeojohnson(df_r[col])
-                datac.loc[datac['R'] == f"R{radius}", lu_cols] = df_r[lu_cols]
-        
-        if power_cf:
-            for radius in [1,5,9]:
-                df_r = datac[datac['R'] == f"R{radius}"]
-                for col in cf_cols:
-                    df_r[col], lam = yeojohnson(df_r[col])
-                datac.loc[datac['R'] == f"R{radius}", cf_cols] = df_r[cf_cols]
+        reg_df1 = gen_reg_table(df_in=df_r1.fillna(0),
+                                cf_col=target_col,
+                                base_cols=base_cols_orig + control_cols,
+                                cat_cols=cat_cols,
+                                ext_cols=r1_lu_cols
+                                )
+        st.data_editor(reg_df1,use_container_width=True, height=500,key=yksi)
 
-        #shares
-        if use_shares:
-            nd_size_dict = {1: 7, 5: 35, 9: 63}
-            for radius in [1, 5, 9]:
-                df_r = datac[datac['R'] == f"R{radius}"].copy()
-                k = nd_size_dict[radius]
-                max_hex = 1 + 3 * k * (k + 1)
+    with viisi:
+        df_r5 = datac[datac['R'] == f"R5"]
+        #table for r
+        r5_lu_cols = [col for col in df_r5.columns if col.startswith('lu')]
+        reg_df5 = gen_reg_table(df_in=df_r5.fillna(0),
+                                cf_col=target_col,
+                                base_cols=base_cols_orig + control_cols,
+                                cat_cols=cat_cols,
+                                ext_cols=r5_lu_cols
+                                )
+        st.data_editor(reg_df5,use_container_width=True, height=500,key=viisi)
 
-                # Update each column in lu_cols
-                for col in lu_cols:
-                    df_r[col] = round(df_r[col].fillna(0) / max_hex, 3)
+    with yhdeksan:
+        df_r9 = datac[datac['R'] == f"R9"]
+        #table for r
+        r9_lu_cols = [col for col in df_r9.columns if col.startswith('lu')]
+        reg_df9 = gen_reg_table(df_in=df_r9.fillna(0),
+                                cf_col=target_col,
+                                base_cols=base_cols_orig + control_cols,
+                                cat_cols=cat_cols,
+                                ext_cols=r9_lu_cols
+                                )
+        st.data_editor(reg_df9,use_container_width=True, height=500,key=yhdeksan)
+    
 
-                # Push the updated data back into the main DataFrame
-                datac.loc[datac['R'] == f"R{radius}", lu_cols] = df_r[lu_cols].values
+    # plot all
+    def plot_correlation(df_in,landuse_cols, alpha=0.06):
 
-        #plot histos
-        yks,viis,ysi,cf = st.tabs(['1km','5km','9km','CF domains'])
- 
-        with yks:
-            histo_traces_lu = []
-            df_r = datac[datac['R'] == f"R1"]
-            for col in lu_cols:
-                histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
-                histo_traces_lu.append(histo)
-            layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
-            histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
-            st.plotly_chart(histo_fig_lu, use_container_width=True)
-        with viis:
-            histo_traces = []
-            df_r = datac[datac['R'] == f"R5"]
-            for col in lu_cols:
-                histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
-                histo_traces.append(histo)
-            layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
-            histo_fig = go.Figure(data=histo_traces, layout=layout_histo)
-            st.plotly_chart(histo_fig, use_container_width=True,key=viis)
-        with ysi:
-            histo_traces = []
-            df_r = datac[datac['R'] == f"R9"]
-            for col in lu_cols:
-                histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
-                histo_traces.append(histo)
-            layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
-            histo_fig = go.Figure(data=histo_traces, layout=layout_histo)
-            st.plotly_chart(histo_fig, use_container_width=True,key=ysi)
-        with cf:
-            histo_traces_cf = []
-            df_r = datac[datac['R'] == f"R1"]
-            for col in cf_cols:
-                histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
-                histo_traces_cf.append(histo)
-            layout_histo = go.Layout(title='CF domain histograms',barmode='overlay')
-            histo_fig_cf = go.Figure(data=histo_traces_cf, layout=layout_histo)
-            st.plotly_chart(histo_fig_cf, use_container_width=True)
+        results_df = df_in.copy()
 
-    #st.data_editor(datac)
+        # Add opacity columns based on significance
+        results_df["ext_opacity"] = np.where(results_df["ext_p"] < alpha, 1, 0.2)
+        results_df["partial_opacity"] = np.where(results_df["partial_p"] < alpha, 1, 0.1)
 
-    with st.expander(f'**Regression tables** {target_cities}', expanded=True):
-        st.caption('https://www.statsmodels.org/stable/example_formulas.html')
+        # Define colors for each correlation type
+        colors = {"ext_β": "orange", "partial_r": "green"}
 
-        yksi,viisi,yhdeksan = st.tabs(['1km','5km','9km'])
-        with yksi:
-            df_r1 = datac[datac['R'] == f"R1"]
-            
-            #table for r
-            r1_lu_cols = [col for col in df_r1.columns if col.startswith('lu')]
+        # Create subplots for facets based on 'R' column (R1 and R5)
+        fig = make_subplots(
+            rows=1, 
+            cols=2, 
+            shared_yaxes=True,   # If you want shared y-axis across facets
+            subplot_titles=["R1", "R5"],  # Titles for facets
+            column_widths=[0.5, 0.5]   # Equal width for both facets
+        )
 
-            reg_df1, base_results, ext_results = ols_reg_table(df_in=df_r1.fillna(0),
-                                    cf_col=target_col,
-                                    base_cols=base_cols_orig + control_cols,
-                                    cat_cols=cat_cols,
-                                    ext_cols=r1_lu_cols,
-                                    standardize=standardize
-                                    )
-            st.data_editor(reg_df1,use_container_width=True, height=500,key=yksi)
-
-        #st.stop() # ----------------------------------------------------------------------------
-
-        with viisi:
-            df_r5 = datac[datac['R'] == f"R5"]
-            #table for r
-            r5_lu_cols = [col for col in df_r5.columns if col.startswith('lu')]
-            reg_df5, base_results, ext_results = ols_reg_table(df_in=df_r5.fillna(0),
-                                    cf_col=target_col,
-                                    base_cols=base_cols_orig + control_cols,
-                                    cat_cols=cat_cols,
-                                    ext_cols=r5_lu_cols,
-                                    standardize=standardize
-                                    )
-            st.data_editor(reg_df5,use_container_width=True, height=500,key=viisi)
-
-        with yhdeksan:
-            df_r9 = datac[datac['R'] == f"R9"]
-            #table for r
-            r9_lu_cols = [col for col in df_r9.columns if col.startswith('lu')]
-            reg_df9, base_results, ext_results = ols_reg_table(df_in=df_r9.fillna(0),
-                                    cf_col=target_col,
-                                    base_cols=base_cols_orig + control_cols,
-                                    cat_cols=cat_cols,
-                                    ext_cols=r9_lu_cols,
-                                    standardize=standardize
-                                    )
-            st.data_editor(reg_df9,use_container_width=True, height=500,key=yhdeksan)
-
-else:
-    st.stop()
-
-
-#st.stop()
-
-with st.expander(f'Regression change plot {target_cities}', expanded=False):
-    c1,c2 =st.columns(2)
-    p_value_thres = c1.slider('P-value filter',0.01,0.3,0.2,step=0.01)
-
-    def gen_regs_for_plot(data,
-                        target_col,
-                        base_cols,
-                        cat_cols,
-                        lu_cols,
-                        standardize,
-                        p_limit=False):
-        radius_dfs = {}
-        for r in [1,5,9]:
-            df_r = data[data['R'] == f"R{r}"]
-            reg_df, base_results, ext_results = ols_reg_table(df_in=df_r.fillna(0),
-                                    cf_col=target_col,
-                                    base_cols=base_cols,
-                                    cat_cols=cat_cols,
-                                    ext_cols=lu_cols,
-                                    standardize=standardize
-                                    )
-            #use only lu cols
-            reg_lu_cols = [col for col in reg_df.T.columns if col.startswith('lu')]
-            reg = reg_df.T[reg_lu_cols].T
-
-            if p_limit:
-                limit = 0.07
-                reg = reg[reg['ext_p'] < limit]
-
-            radius_dfs[f"R{r}"] = reg
-            
-        return radius_dfs
-
-    def plot_ext_r_across_radii(dataframes_dict, regions, target_domain, p_value_threshold=0.07):
-
-        # Convert radius keys to numeric values (removing 'R' prefix if exists)
-        numeric_keys = {}
-        for k in dataframes_dict.keys():
-            if isinstance(k, str) and k.startswith('R'):
-                numeric_keys[k] = float(k[1:])  # Convert 'R1', 'R5' etc to 1, 5
-            else:
-                numeric_keys[k] = float(k)  # Already numeric
+        # Loop through correlation types and add traces for each facet
+        for corr_type, opacity_col in [
+            ("ext_β", "ext_opacity"),
+            ("partial_r", "partial_opacity")
+        ]:
+            # Loop through the values of 'R' (R1 and R5)
+            for idx, r_value in enumerate(["R1", "R5"], start=1):
+                # Filter data by 'R' column
+                res_r = results_df[results_df["R"] == r_value]
+                filtered_data = res_r[res_r['index'].isin(landuse_cols)]
+                filtered_data.rename(columns={'index':'variable'}, inplace=True)
                 
-        # Sort radii numerically
-        sorted_radii = sorted(dataframes_dict.keys(), key=lambda x: numeric_keys[x])
-        
-        # Get all unique variables across all DataFrames
-        all_variables = set()
-        for df in dataframes_dict.values():
-            all_variables.update(df.index.tolist())
-        
-        # Create figure
-        fig = go.Figure()
-        
-        custom_color_map = {
-                            "lu_facilities": "violet",
-                            "lu_modern": "brown",
-                            "lu_suburb": "burlywood",
-                            "lu_exurb":"goldenrod",
-                            "lu_urban":"red",
-                            "lu_urban_lu_modern":"red",
-                            "lu_sports":"orange",
-                            "lu_open":"skyblue",
-                            "lu_parks": "olive",
-                            "lu_parks_lu_sports":"olive",
-                            "lu_forest":"darkgreen",
-                        }
-        
-        # Process data for each variable
-        for var in all_variables:
-            y_values = []
-            x_values = []
-            p_values = []
-            x_labels = []
-            
-            # Collect valid points (where p-value meets threshold)
-            for radius in sorted_radii:
-                df = dataframes_dict[radius]
-                if var in df.index:
-                    p_value = df.loc[var, 'ext_p']
-                    if p_value <= p_value_threshold:
-                        x_values.append(numeric_keys[radius])
-                        x_labels.append(str(radius))
-                        y_values.append(df.loc[var, 'ext_r'])
-                        p_values.append(p_value)
-            
-            # Only add trace if we have at least two valid points
-            if len(x_values) >= 2:
-                fig.add_trace(go.Scatter(
-                    x=x_values,
-                    y=y_values,
-                    name=var,
-                    mode='lines+markers',
-                    line=dict(color=custom_color_map.get(var, 'gray')),
-                    hovertemplate=(
-                        'Radius: %{text}<br>' +
-                        'ext_r: %{y:.3f}<br>' +
-                        'p-value: %{customdata:.3f}<extra></extra>'
-                    ),
-                    text=x_labels,  # Original radius labels for hover
-                    customdata=p_values
-                ))
-        
-        # Update layout
+                # Add trace for each correlation type and facet
+                fig.add_trace(go.Bar(
+                    x=filtered_data['variable'],
+                    y=filtered_data[corr_type],
+                    name=f"{corr_type} ({r_value})",
+                    marker=dict(color=colors[corr_type], opacity=filtered_data[opacity_col]),
+                ), row=1, col=idx)
+
+        # Update layout for better presentation
+        desired_order = sorted(landuse_cols, reverse=True)
         fig.update_layout(
-            title=f"Correlation between '{target_domain}' and landuse types in {regions}",
-            xaxis_title='Radius (km)',
-            yaxis_range=[-0.9,0.9],
-            yaxis_title='ext_r Value',
-            hovermode='x unified',
-            showlegend=True,
-            legend_title='Variables',
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="left",
-                x=1.02
-            ),
-            margin=dict(r=200)
+            xaxis=dict(categoryorder="array", categoryarray=desired_order),
+            xaxis2=dict(categoryorder="array", categoryarray=desired_order),
+            title=f"{target_col}",
+            barmode="group",
+            xaxis_title="Land-Use Type",
+            yaxis_title="Metric Value",
+            height=500,
+            yaxis=dict(range=[-0.4, 0.4]),
+            yaxis2=dict(range=[-0.4, 0.4])
         )
-        
-        # Update x-axis with proper tick labels
-        fig.update_xaxes(
-            tickmode='array',
-            tickvals=[numeric_keys[r] for r in sorted_radii],
-            ticktext=[str(r) for r in sorted_radii]
-        )
-        
+
         return fig
 
-    lu_cols_plot = [col for col in datac.columns if col.startswith('lu')]
-    radius_dfs = gen_regs_for_plot(data=datac,
-                                    target_col=target_col,
-                                    base_cols=base_cols_orig + control_cols,
-                                    cat_cols=cat_cols,
-                                    lu_cols=lu_cols_plot,
-                                    standardize=standardize,
-                                    p_limit=False)
+    reg_df1['R'] = "R1"
+    reg_df5['R'] = "R5"
+    reg_df9['R'] = "R9"
+    reg_df_all = pd.concat([reg_df1,reg_df5,reg_df9])
+    cols = reg_df_all.columns.tolist()
+    new_cols = cols[-1:] + cols[:-1]
+    reg_df_all = reg_df_all[new_cols].reset_index()
+    #st.data_editor(reg_df_all,use_container_width=True)
+    fig = plot_correlation(reg_df_all,landuse_cols=lu_cols)
+    st.plotly_chart(fig,use_container_width=True)
 
-    fig = plot_ext_r_across_radii(radius_dfs,regions=target_cities, target_domain=target_col, p_value_threshold=p_value_thres)
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("---")
     def gen_reg_df_all():
-        reg_df1['ND_km'] = 1
-        reg_df5['ND_km'] = 5
-        reg_df9['ND_km'] = 9
-        reg_df_all = pd.concat([reg_df1,reg_df5,reg_df9])
-        setup = [f'Cluster_level:{cluster}',f'Min_cluster_size:{min_cluster_size}',
-                 f'lu_shares: {use_shares}',f'Standardize: {standardize}',
-                 f'lu_power_transformed: {power_lu}', f'cf_power_transformed: {power_cf}',
-                 f'N={len(datac)}']
+
+        reg_dfs = []
+        for r in datac['R'].unique().tolist():
+            df_r = datac[datac['R'] == r]
+            for target  in cf_cols:
+                reg_df = gen_reg_table(df_in=df_r.fillna(0),
+                                        cf_col=target,
+                                        base_cols=base_cols_orig + control_cols,
+                                        cat_cols=cat_cols,
+                                        ext_cols=r9_lu_cols
+                                        )
+                reg_df['Radius'] = r
+                reg_df['Domain'] = target
+                reg_dfs.append(reg_df)
+            
+        reg_all = pd.concat(reg_dfs)
+
+        if cluster != "None":
+            setup = [f'Cluster_level:{cluster}',f'Min_cluster_size:{min_cluster_size}',
+                    f'N={len(datac)}']
+        else:
+            setup = [f'Cluster_level:{cluster}',
+                    f'N={len(datac)}']
+
         st.download_button(
                             label=f"Download study as CSV",
-                            data=reg_df_all.to_csv().encode("utf-8"),
-                            file_name=f"cfua_data_{target_col}_{control_cols}_{target_cities}_{setup}.csv",
+                            data=reg_all.to_csv().encode("utf-8"),
+                            file_name=f"cfua_data_{control_cols}_{target_cities}_{setup}.csv",
                             mime="text/csv",
                             )
-        
+            
     gen_reg_df_all()
-
-
-
-
-with st.expander(f'**Partial corr** on {target_col} in {target_cities}, N={len(datac)}', expanded=False):
-    import pingouin as pg
-    st.caption("https://pingouin-stats.org/build/html/generated/pingouin.partial_corr.html#pingouin.partial_corr")
-    expl = """
-        "A regular correlation (pearsonr) between landuse type and target carbon_footprint might be misleading 
-        if control variables affect both. Partial correlation "removes" the influence of control variables to check 
-        if each landuse type still correlates with selected carbon_footprint on its own."
-    """
-    st.caption(expl)
-
-    one,five,nine = st.tabs(['1km','5km','9km'])
-    with one:
-        dfr1 = datac[datac['R'] == f"R1"]
-        lu_cols_in_use1 = [col for col in dfr1.columns if col.startswith('lu')]
-        results_list = []
-        for land_use in lu_cols_in_use1:
-            result = pg.partial_corr(data=dfr1, x=land_use, y=target_col, covar=control_cols).assign(land_use=land_use)
-            results_list.append(result)
-        results_df1 = pd.concat(results_list, ignore_index=True)
-        st.data_editor(results_df1)
-    with five:
-        dfr5 = datac[datac['R'] == f"R5"]
-        lu_cols_in_use5 = [col for col in dfr5.columns if col.startswith('lu')]
-        results_list = []
-        for land_use in lu_cols_in_use5:
-            result = pg.partial_corr(data=dfr5, x=land_use, y=target_col, covar=control_cols).assign(land_use=land_use)
-            results_list.append(result)
-        results_df5 = pd.concat(results_list, ignore_index=True)
-        st.data_editor(results_df5)
-    with nine:
-        dfr9 = datac[datac['R'] == f"R9"]
-        lu_cols_in_use9 = [col for col in dfr9.columns if col.startswith('lu')]
-        results_list = []
-        for land_use in lu_cols_in_use9:
-            result = pg.partial_corr(data=dfr9, x=land_use, y=target_col, covar=control_cols).assign(land_use=land_use)
-            results_list.append(result)
-        results_df9 = pd.concat(results_list, ignore_index=True)
-        st.data_editor(results_df9)
-
-
-
-
-
-
-
-
-
-with st.expander(f'Heatmaps for the sample {target_cities}, N={len(datac)}', expanded=False):
-    import matplotlib.pyplot as plt
-    import plotly.express as px
-    import altair as alt
-    from scipy.stats import pearsonr
-
-    dropcols = ['h3_id','fua_name','Country']
-
-    c1,c2 =st.columns(2)
-    p_value_thres = c1.slider('P-value threshold',0.01,0.2,0.09,step=0.01)
-
-    def calculate_p_values(df):
-        """Calculate p-values for pairwise correlations in a DataFrame."""
-        cols = df.columns
-        n = df.shape[0]
-        p_values = np.zeros((len(cols), len(cols)))
-        
-        for i, col1 in enumerate(cols):
-            for j, col2 in enumerate(cols):
-                if i == j:
-                    p_values[i, j] = 0  # Correlation of a feature with itself is 1, p-value is 0
-                else:
-                    _, p_value = pearsonr(df[col1], df[col2])
-                    p_values[i, j] = p_value
-                    
-        return pd.DataFrame(p_values, index=cols, columns=cols)
-
-    def plot_correlation_heatmap_plotly(df, p_value_limit=0.05, facet_col='R'):
-        
-        facet_values = df[facet_col].unique()
-        facet_data = []
-        
-        for value in facet_values:
-            subset = df[df[facet_col] == value].drop(columns=[facet_col])
-            corr_matrix = subset.corr()
-            p_values = calculate_p_values(subset)
-            
-            # Mask correlations with p-values above the limit
-            mask = p_values > p_value_limit
-            corr_matrix[mask] = np.nan
-            
-            # Melt the correlation matrix for plotting
-            melted_corr = corr_matrix.reset_index().melt(id_vars='index', value_name='Correlation')
-            melted_corr.columns = ['Feature1', 'Feature2', 'Correlation']
-            melted_corr['Facet'] = value
-            facet_data.append(melted_corr)
-        
-        final_df = pd.concat(facet_data)
-        
-        # Plot faceted heatmaps
-        fig = px.density_heatmap(final_df, x='Feature1', y='Feature2', z='Correlation',
-                                facet_col='Facet', color_continuous_scale='magma',
-                                labels={'sum of Correlation': 'Correlation'},
-                                histfunc=None)
-
-        fig.update_layout(
-            title="Correlation Heatmap",
-            font=dict(size=10),
-            width=1200,
-            height=600,
-            margin=dict(l=50, r=50, b=50, t=50),
-        )
-
-        fig.update_xaxes(tickfont=dict(size=8))
-        fig.update_yaxes(tickfont=dict(size=8))
-        fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1], font=dict(size=10)))  # Smaller facet label font
-        
-        return fig
-    
-    def plot_correlation_heatmap_altair(df, p_value_limit=0.05, facet_col='R'):
-        """Plot faceted correlation heatmaps with p-value filtering using Altair."""
-        
-        facet_values = df[facet_col].unique()
-        facet_data = []
-        
-        for value in facet_values:
-            subset = df[df[facet_col] == value].drop(columns=[facet_col])
-            corr_matrix = subset.corr()
-            p_values = calculate_p_values(subset)
-            
-            # Mask correlations with p-values above the limit
-            mask = p_values > p_value_limit
-            corr_matrix[mask] = np.nan
-            
-            # Melt the correlation matrix for Altair
-            melted_corr = corr_matrix.reset_index().melt(id_vars='index', value_name='Correlation')
-            melted_corr.columns = ['Feature1', 'Feature2', 'Correlation']
-            melted_corr['Facet'] = value
-            facet_data.append(melted_corr)
-        
-        # Combine all faceted data into one DataFrame
-        final_df = pd.concat(facet_data)
-        
-        # Create the base heatmap
-        heatmap = alt.Chart(final_df).mark_rect().encode(
-            x='Feature1:N',  # Feature1 as nominal (categorical)
-            y='Feature2:N',  # Feature2 as nominal (categorical)
-            color=alt.Color('Correlation:Q', scale=alt.Scale(scheme='magma')),  # Color scale
-            tooltip=['Feature1', 'Feature2', 'Correlation']  # Tooltip for interactivity
-        ).properties(
-            width=300,  # Width of each facet
-            height=300  # Height of each facet
-        )
-        
-        # Facet the heatmap by the 'Facet' column
-        faceted_heatmap = heatmap.facet(
-            facet=alt.Facet('Facet:N', title=None),  # Facet by the 'Facet' column
-            columns=2  # Number of columns in the facet grid
-        ).resolve_scale(
-            x='independent',  # Independent x-axis for each facet
-            y='independent'   # Independent y-axis for each facet
-        )
-        
-        return faceted_heatmap
-
-    def plot_scatter(df, x_col, y_cols):
-        fig = px.scatter()
-        for y_col in y_cols:
-            fig.add_scatter(x=df[x_col], y=df[y_col], mode='markers', name=y_col)
-        
-        fig.update_layout(
-            title=f"Scatter Plot of {x_col} vs Multiple Y Columns",
-            xaxis_title=x_col,
-            yaxis_title="Values",
-            legend_title="Y Columns"
-        )
-        return fig
-
-    df_r = datac[datac['R'] == f"R1"]
-    df_h = df_r.drop(columns=dropcols)
-    f1 = plot_correlation_heatmap_altair(datac.drop(columns=dropcols), p_value_limit=p_value_thres)
-    lu_cols_in_h = [col for col in df_h.columns if col.startswith('lu')]
-    #f1 = plot_scatter(df_h,x_col=target_col,y_cols=lu_cols_in_h)
-    #st.plotly_chart(f1,use_container_width=True)
-    st.altair_chart(f1)
