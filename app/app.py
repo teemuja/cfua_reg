@@ -330,7 +330,7 @@ with st.expander(f'Regression settings', expanded=True):
     s1,s2,s3 = st.columns(3)
     power_lucf = s1.toggle("Power transform distribution",value=True,
                            help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
-    standardize = False #s2.toggle("Standardize instead of normalize")
+    norm = s2.radio("Normalization",['none','normalize','standardize'],horizontal=True)
 
     if power_lucf:
         for radius in [1,5,9]:
@@ -360,10 +360,11 @@ with st.expander(f'Regression settings', expanded=True):
     do_not_norm_cols = cat_cols + feat_cols + ['h3_id']
     cols_to_normalize = [col for col in datac.columns if col not in do_not_norm_cols]
     
-    if standardize:
-        datac = standardize_df(df_in=datac,cols=cols_to_normalize)
-    else:
+    if norm == 'normalize':
         datac = normalize_df(df_in=datac,cols=cols_to_normalize)
+    elif norm == 'standardize':
+        datac = standardize_df(df_in=datac,cols=cols_to_normalize)
+
     
     #plot histos
     yksi,viisi,yhdeksan,cf = st.tabs(['1km','5km','9km','CF'])
@@ -575,8 +576,8 @@ with st.expander(f'Regression tables', expanded=True):
             xaxis_title="Land-Use Type",
             yaxis_title="Metric Value",
             height=500,
-            yaxis=dict(range=[-0.4, 0.4]),
-            yaxis2=dict(range=[-0.4, 0.4])
+            yaxis=dict(range=[-0.8, 0.8]),
+            yaxis2=dict(range=[-0.8, 0.8])
         )
 
         return fig
@@ -588,8 +589,9 @@ with st.expander(f'Regression tables', expanded=True):
     cols = reg_df_all.columns.tolist()
     new_cols = cols[-1:] + cols[:-1]
     reg_df_all = reg_df_all[new_cols].reset_index()
-    #st.data_editor(reg_df_all,use_container_width=True)
-    fig = plot_correlation(reg_df_all,landuse_cols=lu_cols)
+
+    #PLOT
+    fig = plot_correlation(reg_df_all,landuse_cols=lu_cols,alpha=0.05)
     st.plotly_chart(fig,use_container_width=True)
 
     def gen_reg_df_all():
@@ -612,15 +614,15 @@ with st.expander(f'Regression tables', expanded=True):
 
         if cluster != "None":
             setup = [f'Cluster_level:{cluster}',f'Min_cluster_size:{min_cluster_size}',
-                    f'N={len(datac)}']
+                    f'N={len(datac)}',f'Control_cols:{control_cols}',f'Lu_cols:{lu_cols}',f'norm:{norm}']
         else:
             setup = [f'Cluster_level:{cluster}',
-                    f'N={len(datac)}']
+                    f'N={len(datac)}',f'Control_cols:{control_cols}',f'Lu_cols:{lu_cols}',f'norm:{norm}']
 
         st.download_button(
                             label=f"Download study as CSV",
                             data=reg_all.to_csv().encode("utf-8"),
-                            file_name=f"cfua_data_{control_cols}_{target_cities}_{setup}.csv",
+                            file_name=f"cfua_data_SETUP:{setup}.csv",
                             mime="text/csv",
                             )
             
