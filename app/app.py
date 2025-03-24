@@ -90,9 +90,11 @@ with st.status('Connecting database..') as dbstatus:
         else:
             df_out = duckdb.sql(f"SELECT * FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND{R}km_F.parquet')").to_df().drop(columns=['__index_level_0__'])
         
+        #renames
+        df_out.rename(columns={'Vehicle possession footprint':'Vehicle footprint'}, inplace=True)
         cf_cols = ['Housing footprint',
                 'Diet footprint',
-                'Vehicle possession footprint',
+                'Vehicle footprint',
                 'Public transportation footprint',
                 'Leisure travel footprint',
                 'Goods and services footprint',
@@ -101,7 +103,6 @@ with st.status('Connecting database..') as dbstatus:
                 'Total footprint',
                 'Total footprint unit'
                 ]
-        
         df_out.rename(columns={col: 'cf_' + col for col in cf_cols}, inplace=True)
 
         #fix lu_lu_ ..
@@ -238,9 +239,6 @@ with st.expander('Case cities & Clusters', expanded=False):
         col_order = ['h3_id'] + feat_cols + cat_cols + non_cat_base_cols + cf_cols + lu_cols_in_use
         datac = datac[col_order]
 
-        st.data_editor(datac.describe())
-        st.data_editor(datac, height=200)
-
     else:
         st.stop()
 
@@ -270,67 +268,170 @@ with st.expander('Case cities & Clusters', expanded=False):
         download(df=datac)
 
 
-## ------- combined reg study ---------
+def box_plot(df,group_col,total_col,cf_cols,shares=True):
+    df_melted = df.melt(id_vars=[group_col, total_col], value_vars=cf_cols, 
+                var_name='CF_Domain', value_name='Carbon_Footprint')
+    
+    hel_N = len(df[df['fua_name'] == 'Helsinki'])
+    sto_N = len(df[df['fua_name'] == 'Stockholm'])
+    cop_N = len(df[df['fua_name'] == 'København'])
+    osl_N = len(df[df['fua_name'] == 'Oslo'])
+    rey_N = len(df[df['fua_name'] == 'Reykjavík'])
 
-target_col = st.selectbox("Target domain",cf_cols,index=5)
+    city_dict = {'København':f'Copenhagen (N {cop_N})','Reykjavík':f'Reykjavik (N {rey_N})',
+                'Helsinki':f'Helsinki (N {hel_N})','Oslo':f'Oslo (N {osl_N})','Stockholm':f'Stockholm (N {sto_N})'}
+    df_melted['fua_name'] = df_melted['fua_name'].map(city_dict)
+
+    df_melted['Share_of_Total'] = (df_melted['Carbon_Footprint'] / df_melted[total_col]) * 100
+
+    avg_shares = df_melted.groupby([group_col, 'CF_Domain'])['Share_of_Total'].mean().reset_index()
+    short_labels = {'cf_Goods and services footprint':'Gs',
+                    'cf_Vehicle footprint':'Ve',
+                    'cf_Leisure travel footprint':'Le'}
+    avg_shares['CF_Domain'] = avg_shares['CF_Domain'].map(short_labels)
+
+    grouped_text = avg_shares.groupby(group_col).apply(
+        lambda x: "<br>".join([f"{row['CF_Domain']}: {row['Share_of_Total']:.1f}%" 
+                                for _, row in x.iterrows()])
+    ).reset_index(name='annotation_text')
+    
+    legend_labels_fix = {'cf_Goods and services footprint':'Goods and services (Gs)',
+                    'cf_Vehicle footprint':'Vehicle (Ve)',
+                    'cf_Leisure travel footprint':'Leisure travel (Le)'}
+    df_melted['CF_Domain'] = df_melted['CF_Domain'].map(legend_labels_fix)
+    fig = px.box(
+        df_melted,
+        x=group_col,
+        y='Carbon_Footprint',
+        color='CF_Domain',
+        title='Carbon Footprint by Country and Domain',
+        labels={'Carbon_Footprint': 'Carbon Footprint', 'fua_name': 'City', 'CF_Domain':'Footprint domain'},
+        boxmode='group',
+        color_discrete_sequence=px.colors.qualitative.Pastel,
+        hover_data={'Share_of_Total': ':.1f%'}
+    )
+    fig.update_layout(
+        margin={"r": 0, "t": 30, "l": 0, "b": 0}, height=700,
+        legend=dict(yanchor="top", y=0.95, xanchor="left", x=0.01)
+    )
+
+    if shares:
+        for _, row in grouped_text.iterrows():
+            fig.add_annotation(
+                x=row[group_col],
+                y=-0.05 * df_melted['Carbon_Footprint'].max(),  # Position just below the axis
+                text=row['annotation_text'],  # Multi-line text per group
+                showarrow=False,
+                font=dict(size=10, color='black'),
+                xanchor='center',
+                yanchor='top',
+                align='center'
+            )
+
+        fig.update_layout(
+            margin=dict(b=100),  # Add space at the bottom for multi-line percentages
+            xaxis_title_standoff=40  # Push x-axis title down for cleaner layout
+        )
+
+    return fig
 
 with st.expander(f'Regression settings', expanded=True):
 
-    #base cols
-    if target_col == "cf_Total footprint unit":
-        con_cols_to_choose = ['Country','Education level','Household type','Car in household','Household unit income decile ORIG']
-    else:
-        con_cols_to_choose = ['Country','Education level','Household type','Car in household','Household per capita income decile ORIG']
-    
-    #multiselect cat cols to use = control
-    base_cols_orig = ['Age']
-    control_cols = st.multiselect('Control columns',con_cols_to_choose, default=["Country","Household type",con_cols_to_choose[4]])
-
-    st.markdown("---")
-    remove_cols = st.multiselect('Remove landuse classes',lu_cols_in_use, default=['lu_open','lu_facilities'])
-    if remove_cols:
-        datac.drop(columns=remove_cols, inplace=True)
-        lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
-
     #reclassification
-    s1,s2,s3,s4 = st.columns(4)
-    combine_cols1 = s1.multiselect('Combine landuse classes',lu_cols_in_use)
-    if len(combine_cols1) > 1:
-        new_col_name = "_".join(combine_cols1)
-        datac[new_col_name] = datac[combine_cols1].sum(axis=1)
-        datac.drop(columns=combine_cols1, inplace=True)
-        lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
-        
-        #..add another comb set
-        combine_cols2 = s2.multiselect('..Combine more',lu_cols_in_use)
-        if len(combine_cols2) > 1:
-            new_col_name2 = "_".join(combine_cols2)
-            datac[new_col_name2] = datac[combine_cols2].sum(axis=1)
-            datac.drop(columns=combine_cols2, inplace=True)
-            lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+    use_predefined = st.toggle('Use pre-defined settings',value=True)
 
+    ## ------- reg study ---------
+    default_target_domains = ['cf_Goods and services footprint',
+                              'cf_Leisure travel footprint',
+                              'cf_Vehicle footprint',
+                              'cf_Total footprint'
+                              ]
+    base_cols_orig = ['Age']
+
+    if use_predefined:
+        target_cols = default_target_domains
+        control_cols = ['Household per capita income decile ORIG','Household type']
+        #remove_cols = ['lu_open']
+        #datac.drop(columns=remove_cols, inplace=True)
+        combine_cols1 = ['lu_parks','lu_forest','lu_open']
+        #combine_cols2 = ['lu_parks','lu_forest']
+        new_col_name1 = "_".join(combine_cols1)
+        #new_col_name2 = "_".join(combine_cols2)
+        datac[new_col_name1] = datac[combine_cols1].sum(axis=1)
+        #datac[new_col_name2] = datac[combine_cols2].sum(axis=1)
+        datac.drop(columns=combine_cols1, inplace=True)
+        #datac.drop(columns=combine_cols2, inplace=True)
+        lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+        lu_premap = {'lu_urban':'Urban',
+                     'lu_modern':'Modern',
+                     'lu_suburb':'Suburban',
+                     'lu_exurb':'Exurban',
+                     'lu_sports':'Recreation',
+                     'lu_parks_lu_forest_open':'Green',
+                     'lu_facilities':'Facilities'
+                    }
+        preset_order = ['Urban','Facilities','Recreation','Suburban','Exurban','Green']
+        power_lucf = True
+        norm = 'standardize'
+
+    else:
+        target_cols = st.multiselect("Target domains",cf_cols,default=default_target_domains, max_selections=5)
+
+        #base cols
+        if "cf_Total footprint unit" in target_cols:
+            con_cols_to_choose = ['Country','Education level','Household type','Car in household','Household unit income decile ORIG']
+        else:
+            con_cols_to_choose = ['Country','Education level','Household type','Car in household','Household per capita income decile ORIG']
+        
+        #multiselect cat cols to use = control
+        control_cols = st.multiselect('Control columns',con_cols_to_choose, default=["Country","Household type",con_cols_to_choose[4]])
+
+        remove_cols = st.multiselect('Remove landuse classes',lu_cols_in_use, default=['lu_open','lu_facilities','lu_forest'])
+        if remove_cols:
+            datac.drop(columns=remove_cols, inplace=True)
+            lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+        s1,s2,s3,s4 = st.columns(4)
+        combine_cols1 = s1.multiselect('Combine landuse classes',lu_cols_in_use)
+    
+        if len(combine_cols1) > 1:
+            new_col_name = "_".join(combine_cols1)
+            datac[new_col_name] = datac[combine_cols1].sum(axis=1)
+            datac.drop(columns=combine_cols1, inplace=True)
+            lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
+            
             #..add another comb set
-            combine_cols3 = s3.multiselect('..Combine more',lu_cols_in_use)
-            if len(combine_cols3) > 1:
-                new_col_name3 = "_".join(combine_cols3)
-                datac[new_col_name3] = datac[combine_cols3].sum(axis=1)
-                datac.drop(columns=combine_cols3, inplace=True)
+            combine_cols2 = s2.multiselect('..Combine more',lu_cols_in_use)
+            if len(combine_cols2) > 1:
+                new_col_name2 = "_".join(combine_cols2)
+                datac[new_col_name2] = datac[combine_cols2].sum(axis=1)
+                datac.drop(columns=combine_cols2, inplace=True)
                 lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
 
                 #..add another comb set
-                combine_cols4 = s4.multiselect('..Combine more',lu_cols_in_use)
-                if len(combine_cols4) > 1:
-                    new_col_name4 = "_".join(combine_cols4)
-                    datac[new_col_name4] = datac[combine_cols4].sum(axis=1)
-                    datac.drop(columns=combine_cols4, inplace=True)
+                combine_cols3 = s3.multiselect('..Combine more',lu_cols_in_use)
+                if len(combine_cols3) > 1:
+                    new_col_name3 = "_".join(combine_cols3)
+                    datac[new_col_name3] = datac[combine_cols3].sum(axis=1)
+                    datac.drop(columns=combine_cols3, inplace=True)
                     lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
 
-    lu_cols = [col for col in datac.columns if col.startswith('lu')]
+                    #..add another comb set
+                    combine_cols4 = s4.multiselect('..Combine more',lu_cols_in_use)
+                    if len(combine_cols4) > 1:
+                        new_col_name4 = "_".join(combine_cols4)
+                        datac[new_col_name4] = datac[combine_cols4].sum(axis=1)
+                        datac.drop(columns=combine_cols4, inplace=True)
+                        lu_cols_in_use = [col for col in datac.columns if col.startswith('lu')]
 
-    s1,s2,s3 = st.columns(3)
-    power_lucf = s1.toggle("Power transform distribution",value=True,
-                           help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
-    norm = s2.radio("Normalization",['none','normalize','standardize'],horizontal=True)
+        #distribution settings
+        power_lucf = st.toggle("Power transform distribution",value=True,
+                            help="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
+        norm = st.radio("Normalization",['none','normalize','standardize'],index=2,horizontal=True)
+        st.caption('Method for pearson: https://www.statsmodels.org/stable/example_formulas.html')
+        st.caption('Method for partial spearman: https://pingouin-stats.org/build/html/generated/pingouin.partial_corr.html#pingouin.partial_corr')
+        st.caption("Distributions power transformed (and standardized) for all non-categorical variables using https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
+
+    lu_cols = [col for col in datac.columns if col.startswith('lu')]
 
     if power_lucf:
         for radius in [1,5,9]:
@@ -340,7 +441,7 @@ with st.expander(f'Regression settings', expanded=True):
             datac.loc[datac['R'] == f"R{radius}", lu_cols] = df_r[lu_cols]
             datac.loc[datac['R'] == f"R{radius}", cf_cols] = df_r[cf_cols]
 
-    
+
     def normalize_df(df_in,cols=None):
         df = df_in.copy()
         if cols is None:
@@ -365,54 +466,79 @@ with st.expander(f'Regression settings', expanded=True):
     elif norm == 'standardize':
         datac = standardize_df(df_in=datac,cols=cols_to_normalize)
 
+    if (norm == 'none') and (not power_lucf):
+        show_shares = True
+    else:
+        show_shares = False
     
     #plot histos
-    yksi,viisi,yhdeksan,cf = st.tabs(['1km','5km','9km','CF'])
-    with yksi:
-        histo_traces_lu = []
-        df_r1 = datac[datac['R'] == f"R1"]
-        for col in lu_cols:
-            histo = go.Histogram(x=df_r1[col],opacity=0.75,name=col,nbinsx=20)
-            histo_traces_lu.append(histo)
-        layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
-        histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
-        st.plotly_chart(histo_fig_lu, use_container_width=True)
-    with viisi:
-        histo_traces_lu = []
-        df_r = datac[datac['R'] == f"R5"]
-        for col in lu_cols:
-            histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
-            histo_traces_lu.append(histo)
-        layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
-        histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
-        st.plotly_chart(histo_fig_lu, use_container_width=True)
-    with yhdeksan:
-        histo_traces_lu = []
-        df_r = datac[datac['R'] == f"R9"]
-        for col in lu_cols:
-            histo = go.Histogram(x=df_r[col],opacity=0.75,name=col,nbinsx=20)
-            histo_traces_lu.append(histo)
-        layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
-        histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
-        st.plotly_chart(histo_fig_lu, use_container_width=True)
+    if not use_predefined:
+        st.markdown("---")
+        if st.toggle('Show histograms'):
+            yksi,viisi,yhdeksan,cf = st.tabs(['1km','5km','9km','CF'])
+            with yksi:
+                histo_traces_lu = []
+                df_r1 = datac[datac['R'] == f"R1"]
+                trueN = len(df_r1)
+                for col in lu_cols:
+                    histo = go.Histogram(x=df_r1[col],opacity=0.75,name=col,nbinsx=20)
+                    histo_traces_lu.append(histo)
+                layout_histo = go.Layout(title=f'Landuse type histograms {trueN}',barmode='overlay')
+                histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
+                st.plotly_chart(histo_fig_lu, use_container_width=True)
+                st.data_editor(df_r1.describe())
+                st.markdown("---")
 
-    with cf:
-        histo_traces_cf = []
-        for col in cf_cols:
-            histo = go.Histogram(x=datac[col],opacity=0.75,name=col,nbinsx=20)
-            histo_traces_cf.append(histo)
-        layout_histo = go.Layout(title='CF domain histograms',barmode='overlay')
-        histo_fig_lu = go.Figure(data=histo_traces_cf, layout=layout_histo)
-        st.plotly_chart(histo_fig_lu, use_container_width=True)
+                box_fig1  = box_plot(df=df_r1,group_col="fua_name",total_col="cf_Total footprint",cf_cols=target_cols,shares=show_shares)
+                st.plotly_chart(box_fig1, use_container_width=True, key='b1')
+
+            with viisi:
+                histo_traces_lu = []
+                df_r5 = datac[datac['R'] == f"R5"]
+                for col in lu_cols:
+                    histo = go.Histogram(x=df_r5[col],opacity=0.75,name=col,nbinsx=20)
+                    histo_traces_lu.append(histo)
+                layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
+                histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
+                st.plotly_chart(histo_fig_lu, use_container_width=True)
+                st.data_editor(df_r5.describe())
+                st.markdown("---")
+
+                box_fig5  = box_plot(df=df_r5,group_col="fua_name",total_col="cf_Total footprint",cf_cols=target_cols,shares=show_shares)
+                st.plotly_chart(box_fig5, use_container_width=True, key='b5')
+
+            with yhdeksan:
+                histo_traces_lu = []
+                df_r9 = datac[datac['R'] == f"R9"]
+                for col in lu_cols:
+                    histo = go.Histogram(x=df_r9[col],opacity=0.75,name=col,nbinsx=20)
+                    histo_traces_lu.append(histo)
+                layout_histo = go.Layout(title='Landuse type histograms',barmode='overlay')
+                histo_fig_lu = go.Figure(data=histo_traces_lu, layout=layout_histo)
+                st.plotly_chart(histo_fig_lu, use_container_width=True)
+                st.data_editor(df_r9.describe())
+                st.markdown("---")
+
+                box_fig9  = box_plot(df=df_r9,group_col="fua_name",total_col="cf_Total footprint",cf_cols=target_cols,shares=show_shares)
+                st.plotly_chart(box_fig9, use_container_width=True, key='b9')
+
+            with cf:
+                histo_traces_cf = []
+                for col in cf_cols:
+                    histo = go.Histogram(x=datac[col],opacity=0.75,name=col,nbinsx=20)
+                    histo_traces_cf.append(histo)
+                layout_histo = go.Layout(title='CF domain histograms',barmode='overlay')
+                histo_fig_lu = go.Figure(data=histo_traces_cf, layout=layout_histo)
+                st.plotly_chart(histo_fig_lu, use_container_width=True)
 
 
 
+if len(target_cols) == 0 or len(target_cities) == 0:
+    st.stop()
 
-with st.expander(f'Regression tables', expanded=True):
-    st.caption('Method for pearson: https://www.statsmodels.org/stable/example_formulas.html')
-    st.caption('Method for partial spearman: https://pingouin-stats.org/build/html/generated/pingouin.partial_corr.html#pingouin.partial_corr')
-    st.caption("Distributions power transformed (and standardized) for all non-categorical variables using https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.yeojohnson.html")
-
+## ------- reg tables ---------
+with st.expander(f'Regression tables', expanded=False):
+    
     def gen_reg_table(df_in, cf_col, base_cols, cat_cols, ext_cols):
         
         df_for_ols = df_in.copy()
@@ -483,101 +609,169 @@ with st.expander(f'Regression tables', expanded=True):
             # Merge partial correlation results with the regression results
             reg_results = reg_results.join(partial_corr_df, how='outer')
 
-            return reg_results
+            return reg_results, base_results, ext_results
 
-    yksi,viisi,yhdeksan = st.tabs(['1km','5km','9km'])
-    with yksi:
-        df_r1 = datac[datac['R'] == f"R1"]
-        
-        #table for r
-        r1_lu_cols = [col for col in df_r1.columns if col.startswith('lu')]
+    def gen_reg_table_multitarget(datac,target_cf_cols,
+                       base_cols,
+                       cat_cols,
+                       ext_cols):
+        reg_dfs = []
+        for r in datac['R'].unique().tolist():
+            df_r = datac[datac['R'] == r]
+            for target  in target_cf_cols:
+                reg_df, base_results, ext_results = gen_reg_table(df_in=df_r.fillna(0),
+                                        cf_col=target,
+                                        base_cols=base_cols,
+                                        cat_cols=cat_cols,
+                                        ext_cols=ext_cols
+                                        )
+                reg_df['Radius'] = r
+                reg_df['Domain'] = target
+                reg_dfs.append(reg_df)
+            
+        reg_all = pd.concat(reg_dfs)
 
-        reg_df1 = gen_reg_table(df_in=df_r1.fillna(0),
-                                cf_col=target_col,
-                                base_cols=base_cols_orig + control_cols,
-                                cat_cols=cat_cols,
-                                ext_cols=r1_lu_cols
-                                )
-        st.data_editor(reg_df1,use_container_width=True, height=500,key=yksi)
+        return reg_all
+    
 
+    if len(target_cols) >= 1:
+
+        yksi,viisi,yhdeksan = st.tabs(['1km','5km','9km'])
+        with yksi:
+            df_r1 = datac[datac['R'] == f"R1"]
+
+            r1_lu_cols = [col for col in df_r1.columns if col.startswith('lu')]
+            
+            reg_df1 = gen_reg_table_multitarget(datac=df_r1.fillna(0),
+                                    target_cf_cols=target_cols,
+                                    base_cols=base_cols_orig + control_cols,
+                                    cat_cols=cat_cols,
+                                    ext_cols=r1_lu_cols
+                                    )
+            if use_predefined:
+                reg_df1.rename(index=lu_premap, inplace=True)
+            st.data_editor(reg_df1.drop(columns='Radius'),use_container_width=True, height=500,key=yksi)
+
+            # if len(target_cols) == 1:
+            #     if st.toggle('Show OLS summary', key=1):
+            #         r1,r2 = st.columns(2)
+            #         with r1:
+            #             st.markdown('**Base model**')
+            #             st.text(base_results.summary())
+            #         with r2:
+            #             st.markdown('**Ext. model**')
+            #             st.text(ext_results.summary())
+    
     with viisi:
         df_r5 = datac[datac['R'] == f"R5"]
-        #table for r
         r5_lu_cols = [col for col in df_r5.columns if col.startswith('lu')]
-        reg_df5 = gen_reg_table(df_in=df_r5.fillna(0),
-                                cf_col=target_col,
-                                base_cols=base_cols_orig + control_cols,
-                                cat_cols=cat_cols,
-                                ext_cols=r5_lu_cols
-                                )
-        st.data_editor(reg_df5,use_container_width=True, height=500,key=viisi)
+        reg_df5 = gen_reg_table_multitarget(datac=df_r5.fillna(0),
+                                    target_cf_cols=target_cols,
+                                    base_cols=base_cols_orig + control_cols,
+                                    cat_cols=cat_cols,
+                                    ext_cols=r5_lu_cols
+                                    )
+        if use_predefined:
+            reg_df5.rename(index=lu_premap, inplace=True)
+        st.data_editor(reg_df5.drop(columns='Radius'),use_container_width=True, height=500,key=viisi)
 
     with yhdeksan:
         df_r9 = datac[datac['R'] == f"R9"]
-        #table for r
         r9_lu_cols = [col for col in df_r9.columns if col.startswith('lu')]
-        reg_df9 = gen_reg_table(df_in=df_r9.fillna(0),
-                                cf_col=target_col,
-                                base_cols=base_cols_orig + control_cols,
-                                cat_cols=cat_cols,
-                                ext_cols=r9_lu_cols
-                                )
-        st.data_editor(reg_df9,use_container_width=True, height=500,key=yhdeksan)
+        reg_df9 = gen_reg_table_multitarget(datac=df_r9.fillna(0),
+                                    target_cf_cols=target_cols,
+                                    base_cols=base_cols_orig + control_cols,
+                                    cat_cols=cat_cols,
+                                    ext_cols=r9_lu_cols
+                                    )
+        if use_predefined:
+            reg_df9.rename(index=lu_premap, inplace=True)
+        st.data_editor(reg_df9.drop(columns='Radius'),use_container_width=True, height=500,key=yhdeksan)
+
+
+with st.expander(f'Regression plots', expanded=True):
     
-
-    # plot all
-    def plot_correlation(df_in,landuse_cols, alpha=0.06):
-
+    def plot_partial_r_with_beta_text(df_in, landuse_cols, alpha=0.06):
         results_df = df_in.copy()
 
         # Add opacity columns based on significance
-        results_df["ext_opacity"] = np.where(results_df["ext_p"] < alpha, 1, 0.2)
         results_df["partial_opacity"] = np.where(results_df["partial_p"] < alpha, 1, 0.1)
-
-        # Define colors for each correlation type
-        colors = {"ext_β": "orange", "partial_r": "green"}
+        results_df["beta_text_color"] = np.where(results_df["ext_p"] < alpha, "black", "lightgrey")
 
         # Create subplots for facets based on 'R' column (R1 and R5)
         fig = make_subplots(
             rows=1, 
             cols=2, 
-            shared_yaxes=True,   # If you want shared y-axis across facets
-            subplot_titles=["R1", "R5"],  # Titles for facets
-            column_widths=[0.5, 0.5]   # Equal width for both facets
+            shared_yaxes=True,
+            subplot_titles=["Radius 1km", "Radius 5km"],
+            column_widths=[0.5, 0.5]
         )
 
-        # Loop through correlation types and add traces for each facet
-        for corr_type, opacity_col in [
-            ("ext_β", "ext_opacity"),
-            ("partial_r", "partial_opacity")
-        ]:
-            # Loop through the values of 'R' (R1 and R5)
+        # Loop cf domains..
+        cf_domains = results_df['Domain'].unique().tolist()
+        # Define colors
+        partial_colors = {"cf_Vehicle footprint":"skyblue",
+                          "cf_Goods and services footprint":"orange",
+                          "cf_Leisure travel footprint":"red"}
+
+        domain_offsets = np.linspace(-0.3, 0.3, len(cf_domains))  # Spread offsets evenly around center
+
+        # Loop through each domain and R value
+        for dom_idx, dom in enumerate(cf_domains):
+            results_df_dom = results_df[results_df['Domain'] == dom]
+            partial_color = partial_colors.get(dom, 'grey')
+
             for idx, r_value in enumerate(["R1", "R5"], start=1):
-                # Filter data by 'R' column
-                res_r = results_df[results_df["R"] == r_value]
+                res_r = results_df_dom[results_df_dom["R"] == r_value]
                 filtered_data = res_r[res_r['index'].isin(landuse_cols)]
-                filtered_data.rename(columns={'index':'variable'}, inplace=True)
-                
-                # Add trace for each correlation type and facet
+                filtered_data.rename(columns={'index': 'variable'}, inplace=True)
+
+                # Add bar trace for each domain
                 fig.add_trace(go.Bar(
                     x=filtered_data['variable'],
-                    y=filtered_data[corr_type],
-                    name=f"{corr_type} ({r_value})",
-                    marker=dict(color=colors[corr_type], opacity=filtered_data[opacity_col]),
+                    y=filtered_data['partial_r'],
+                    name=f"{dom} ({r_value})",
+                    marker=dict(color=partial_color, opacity=filtered_data["partial_opacity"]),
                 ), row=1, col=idx)
 
+                # Annotate each bar with the corresponding beta value
+                for var, y_val, beta_val, color in zip(
+                    filtered_data['variable'], 
+                    filtered_data['partial_r'], 
+                    filtered_data['ext_β'], 
+                    filtered_data['beta_text_color']
+                ):
+                    fig.add_annotation(
+                        x=var,
+                        y=y_val + (0.05 * np.sign(y_val)),  # Vertical offset
+                        text=f"{beta_val:.2f}",
+                        showarrow=False,
+                        row=1,
+                        col=idx,
+                        font=dict(color=color, size=12),
+                        yanchor="bottom" if y_val >= 0 else "top",
+                        xref=f"x{idx}",  # Ensure correct x-axis per subplot
+                        xshift=domain_offsets[dom_idx] * 100  # Horizontal shift as a percentage
+                    )
+
+
         # Update layout for better presentation
-        desired_order = sorted(landuse_cols, reverse=True)
+        if use_predefined:
+            desired_order = preset_order
+        else:
+            desired_order = sorted(landuse_cols, reverse=True)
+
         fig.update_layout(
             xaxis=dict(categoryorder="array", categoryarray=desired_order),
             xaxis2=dict(categoryorder="array", categoryarray=desired_order),
-            title=f"{target_col}",
+            title=f"Partial r with β (greyed if insignificant)",
             barmode="group",
-            xaxis_title="Land-Use Type",
-            yaxis_title="Metric Value",
+            xaxis_title=None,
+            yaxis_title="Correlation",
             height=500,
-            yaxis=dict(range=[-0.8, 0.8]),
-            yaxis2=dict(range=[-0.8, 0.8])
+            yaxis=dict(range=[-0.5, 0.5]),
+            yaxis2=dict(range=[-0.5, 0.5]),
+            showlegend=True
         )
 
         return fig
@@ -589,41 +783,32 @@ with st.expander(f'Regression tables', expanded=True):
     cols = reg_df_all.columns.tolist()
     new_cols = cols[-1:] + cols[:-1]
     reg_df_all = reg_df_all[new_cols].reset_index()
+    
+    #st.data_editor(reg_df_all)
+    #st.stop()
 
     #PLOT
-    fig = plot_correlation(reg_df_all,landuse_cols=lu_cols,alpha=0.05)
+    if use_predefined:
+        lu_cols_for_plot = preset_order
+    else:
+        lu_cols_for_plot = lu_cols
+
+    fig = plot_partial_r_with_beta_text(reg_df_all,landuse_cols=lu_cols_for_plot,alpha=0.05)
     st.plotly_chart(fig,use_container_width=True)
 
-    def gen_reg_df_all():
+    
 
-        reg_dfs = []
-        for r in datac['R'].unique().tolist():
-            df_r = datac[datac['R'] == r]
-            for target  in cf_cols:
-                reg_df = gen_reg_table(df_in=df_r.fillna(0),
-                                        cf_col=target,
-                                        base_cols=base_cols_orig + control_cols,
-                                        cat_cols=cat_cols,
-                                        ext_cols=r9_lu_cols
-                                        )
-                reg_df['Radius'] = r
-                reg_df['Domain'] = target
-                reg_dfs.append(reg_df)
-            
-        reg_all = pd.concat(reg_dfs)
+    if cluster != "None":
+        setup = [f'Cluster_level:{cluster}',f'Min_cluster_size:{min_cluster_size}',
+                f'N={len(datac)}',f'Control_cols:{control_cols}',f'Lu_cols:{lu_cols}',f'norm:{norm}']
+    else:
+        setup = [f'Cluster_level:{cluster}',
+                f'N={len(datac)}',f'Control_cols:{control_cols}',f'Lu_cols:{lu_cols}',f'norm:{norm}']
 
-        if cluster != "None":
-            setup = [f'Cluster_level:{cluster}',f'Min_cluster_size:{min_cluster_size}',
-                    f'N={len(datac)}',f'Control_cols:{control_cols}',f'Lu_cols:{lu_cols}',f'norm:{norm}']
-        else:
-            setup = [f'Cluster_level:{cluster}',
-                    f'N={len(datac)}',f'Control_cols:{control_cols}',f'Lu_cols:{lu_cols}',f'norm:{norm}']
+    st.download_button(
+                        label=f"Download study as CSV",
+                        data=reg_df_all.to_csv().encode("utf-8"),
+                        file_name=f"cfua_data_SETUP:{setup}.csv",
+                        mime="text/csv",
+                        )
 
-        st.download_button(
-                            label=f"Download study as CSV",
-                            data=reg_all.to_csv().encode("utf-8"),
-                            file_name=f"cfua_data_SETUP:{setup}.csv",
-                            mime="text/csv",
-                            )
-            
-    gen_reg_df_all()
