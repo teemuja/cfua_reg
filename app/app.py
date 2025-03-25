@@ -367,7 +367,7 @@ with st.expander(f'Regression settings', expanded=True):
                      'lu_suburb':'Suburban',
                      'lu_exurb':'Exurban',
                      'lu_sports':'Recreation',
-                     'lu_parks_lu_forest_open':'Green',
+                     'lu_parks_lu_forest_lu_open':'Green',
                      'lu_facilities':'Facilities'
                     }
         preset_order = ['Urban','Facilities','Recreation','Suburban','Exurban','Green']
