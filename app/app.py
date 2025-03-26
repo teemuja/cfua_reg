@@ -239,6 +239,69 @@ with st.expander('Case cities & Clusters', expanded=False):
         col_order = ['h3_id'] + feat_cols + cat_cols + non_cat_base_cols + cf_cols + lu_cols_in_use
         datac = datac[col_order]
 
+        #viz with bars
+        def country_plot(df_in,cf_cols,city='fua_name'):
+            df = df_in.copy()
+            cols_map = {col: col.removeprefix('cf_') for col in cf_cols if col not in ['cf_Total footprint unit']}
+            cols = list(cols_map.values())
+            df.rename(columns=cols_map, inplace=True)
+            df_grouped = df.groupby(city)[cols].mean().reset_index()
+            cf_cols_filt = [col for col in cols if col != 'Total footprint']
+            df_melted = df_grouped.melt(id_vars='fua_name', value_vars=cf_cols_filt, 
+                                        var_name='Carbon Footprint Type', value_name='Value')
+            
+            earthy_sky_colors = [
+                "#FFD700",  # Golden Yellow (Sun)
+                "#E97451",  # Burnt Sienna (Earth)
+                "#468FAF",  # Sky Blue (Sky)
+                "#87CEEB",  # Light Sky Blue (Sky)
+                "#588157",  # Forest Green (Earth)
+                "#A3B18A",  # Soft Olive (Earth)
+                "#D4A373",  # Warm Sand (Earth)
+                "#8B5A2B",  # Saddle Brown (Earth)
+            ]
+            myorder = [
+                'Goods and services footprint',
+                'Leisure travel footprint',
+                'Vehicle footprint',
+                'Public transportation footprint',
+                'Housing footprint',
+                'Diet footprint',
+                'Pets footprint',
+                'Summer house footprint'
+            ]
+            fig = px.bar(
+                df_melted,
+                x=city,
+                y='Value',
+                color='Carbon Footprint Type',
+                title="Carbon Footprint Breakdown by City",
+                labels={'Value': 'Carbon Footprint','fua_name':'City'},
+                category_orders={'Carbon Footprint Type': myorder},
+                color_discrete_sequence=earthy_sky_colors
+                # px.colors.qualitative.Vivid
+                # https://plotly.com/python/discrete-color/
+            )
+
+            for i, row in df_grouped.iterrows():
+                row['Total footprint'] = round(row['Total footprint']/1000,1)
+                fig.add_annotation(
+                    x=row[city],
+                    y=50 * row['Total footprint'],
+                    text=f"{row['Total footprint']} tCO2e", #:.2f
+                    showarrow=False,
+                    font=dict(size=12, color='black'),
+                    yshift=5
+                )
+
+            # Make sure bars are stacked and ordered by total descending
+            fig.update_layout(barmode='stack', xaxis={'categoryorder': 'total descending'})
+
+            return fig
+        
+        st.plotly_chart(country_plot(df_in=datac,cf_cols=cf_cols,city='fua_name'), use_container_width=True)
+
+
     else:
         st.stop()
 
