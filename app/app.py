@@ -300,6 +300,7 @@ with st.expander('Case cities & Clusters', expanded=False):
             return fig
         
         st.plotly_chart(country_plot(df_in=datac,cf_cols=cf_cols,city='fua_name'), use_container_width=True)
+        st.data_editor(datac.describe())
 
 
     else:
