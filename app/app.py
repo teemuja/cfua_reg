@@ -75,11 +75,11 @@ with st.status('Connecting database..') as dbstatus:
             combined_table = f"""
                     DROP TABLE IF EXISTS combined_table;
                     CREATE TABLE combined_table AS 
-                    SELECT *, 'R1' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND1km_F.parquet')
+                    SELECT *, 'R1' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_outliers_Q01+iqr_R30-10_reso10_ND1km_F.parquet')
                     UNION ALL
-                    SELECT *, 'R5' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND5km_F.parquet')
+                    SELECT *, 'R5' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_outliers_Q01+iqr_R30-10_reso10_ND5km_F.parquet')
                     UNION ALL
-                    SELECT *, 'R9' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_IQR1-5_R30-10_reso10_ND9km_F.parquet')
+                    SELECT *, 'R9' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_outliers_Q01+iqr_R30-10_reso10_ND9km_F.parquet')
                 """
             duckdb.sql(combined_table)
             dropcols = ['__index_level_0__']
@@ -299,8 +299,13 @@ with st.expander('Case cities & Clusters', expanded=False):
 
             return fig
         
-        st.plotly_chart(country_plot(df_in=datac,cf_cols=cf_cols,city='fua_name'), use_container_width=True)
-        st.data_editor(datac.describe())
+        st.plotly_chart(country_plot(df_in=datac[datac['R'] == 'R1'],cf_cols=cf_cols,city='fua_name'), use_container_width=True)
+
+        #check only with one radius data
+        yks,viis,ysi = st.tabs(['1km','5km','9km'])
+        yks.data_editor(datac[datac['R'] == 'R1'].describe())
+        viis.data_editor(datac[datac['R'] == 'R5'].describe())
+        ysi.data_editor(datac[datac['R'] == 'R9'].describe())
 
 
     else:
