@@ -7,6 +7,7 @@ import duckdb
 import plotly.express as px
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
+from collections import Counter, defaultdict
 
 #stats
 from scipy import stats
@@ -75,11 +76,11 @@ with st.status('Connecting database..') as dbstatus:
             combined_table = f"""
                     DROP TABLE IF EXISTS combined_table;
                     CREATE TABLE combined_table AS 
-                    SELECT *, 'R1' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_outliers_Q01+iqr_R30-10_reso10_ND1km_F.parquet')
+                    SELECT *, 'R1' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_outliers_Q01+iqr_R40-10_reso10_ND1km_F.parquet')
                     UNION ALL
-                    SELECT *, 'R5' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_outliers_Q01+iqr_R30-10_reso10_ND5km_F.parquet')
+                    SELECT *, 'R5' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_outliers_Q01+iqr_R40-10_reso10_ND5km_F.parquet')
                     UNION ALL
-                    SELECT *, 'R9' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_outliers_Q01+iqr_R30-10_reso10_ND9km_F.parquet')
+                    SELECT *, 'R9' as R FROM read_parquet('{allas_url}/CFUA/RD/cfua_data_nordics_outliers_Q01+iqr_R40-10_reso10_ND9km_F.parquet')
                 """
             duckdb.sql(combined_table)
             dropcols = ['__index_level_0__']
@@ -121,7 +122,9 @@ with st.status('Connecting database..') as dbstatus:
 
         return df_out
 
-    data = load_data()
+    data_orig = load_data()
+    data = data_orig.copy()
+
     #cols
     cf_cols = [col for col in data.columns if col.startswith('cf_')]
     lu_cols_orig = [col for col in data.columns if col.startswith('lu_')]
@@ -151,8 +154,6 @@ with st.status('Connecting database..') as dbstatus:
 
     st.data_editor(data,key="init_cols",height=200)
 
-    st.markdown("**Land-use reclassification**")
-    st.table(lu_cols_map)
     dbstatus.update(label="DB connected!", state="complete", expanded=False)
 
 
@@ -404,7 +405,77 @@ def box_plot(df,group_col,total_col,cf_cols,shares=True):
 
     return fig
 
-with st.expander(f'Regression settings', expanded=True):
+
+def plot_lu_sankey(data, lu_to_reclass, reclass_to_final):
+
+    df = data.copy()
+
+    # 1. Extract LU columns and remove "lu_" prefix
+    lu_cols = [col for col in df.columns if col.startswith("lu_")]
+    lu_sums = df[lu_cols].sum()
+    lu_sums.index = [col.replace("lu_", "") for col in lu_cols]
+
+    # 2. Build first stage: original → reclass
+    stage1 = defaultdict(float)
+    for orig_class, val in lu_sums.items():
+        if orig_class in lu_to_reclass:
+            reclass = lu_to_reclass[orig_class]
+            stage1[(orig_class, reclass)] += val
+
+    # 3. Build second stage: reclass → final
+    reclass_totals = defaultdict(float)
+    for (_, reclass), val in stage1.items():
+        reclass_totals[reclass] += val
+
+    stage2 = defaultdict(float)
+    for reclass, val in reclass_totals.items():
+        if reclass in reclass_to_final:
+            final = reclass_to_final[reclass]
+            stage2[(reclass, final)] += val
+
+    # 4. Gather all unique labels
+    labels = list(set(
+        [k[0] for k in stage1.keys()] +
+        [k[1] for k in stage1.keys()] +
+        [k[1] for k in stage2.keys()]
+    ))
+    label_idx = {label: i for i, label in enumerate(labels)}
+
+    # 5. Create source-target-value lists
+    def build_links(stage, label_idx):
+        source = [label_idx[src] for (src, tgt) in stage.keys()]
+        target = [label_idx[tgt] for (src, tgt) in stage.keys()]
+        value = list(stage.values())
+        return source, target, value
+
+    s1_source, s1_target, s1_value = build_links(stage1, label_idx)
+    s2_source, s2_target, s2_value = build_links(stage2, label_idx)
+
+    # Combine both stages
+    source = s1_source + s2_source
+    target = s1_target + s2_target
+    value = s1_value + s2_value
+
+    # 6. Plot with Plotly
+    fig = go.Figure(data=[go.Sankey(
+        node=dict(
+            pad=15,
+            thickness=20,
+            line=dict(color="black", width=0.5),
+            label=labels
+        ),
+        link=dict(
+            source=source,
+            target=target,
+            value=value
+        )
+    )])
+
+    fig.update_layout(title_text="Land-Use Reclassification Sankey", font_size=10)
+    return fig
+
+
+with st.expander(f'Regression settings', expanded=False):
 
     #reclassification
     use_predefined = st.toggle('Use pre-defined settings',value=True)
@@ -442,6 +513,31 @@ with st.expander(f'Regression settings', expanded=True):
         preset_order = ['Urban','Facilities','Recreation','Suburban','Exurban','Green']
         power_lucf = True
         norm = 'standardize'
+
+        s1,s2 = st.columns(2)
+        s1.table(lu_cols_map)
+        s2.table(lu_premap)
+
+        #if st.toggle("Show land-use classification in preset"):
+            # data_orig = data_orig[data_orig['fua_name'].isin(target_cities)]
+            # t1,t5,t9 = st.tabs(['1km','5km','9km'])
+            # with t1:
+            #     data1 = data_orig[data_orig['R'] == "R1"]
+            #     d1 = data1.drop(columns=["h3_10"]).sum().to_frame().T
+            #     sankeyfig1 = plot_lu_sankey(data=d1, lu_to_reclass=lu_cols_map, reclass_to_final=lu_premap)
+            #     st.plotly_chart(sankeyfig1, use_container_width=True,key='san1')
+            # with t5:
+            #     data5 = data_orig[data_orig['R'] == "R5"]
+            #     d5 = data5.drop(columns=["h3_10"]).sum().to_frame().T
+            #     sankeyfig5 = plot_lu_sankey(data=d5, lu_to_reclass=lu_cols_map, reclass_to_final=lu_premap)
+            #     st.plotly_chart(sankeyfig5, use_container_width=True,key='san5')
+            # with t9:
+            #     data9 = data_orig[data_orig['R'] == "R9"]
+            #     d9 = data9.drop(columns=["h3_10"]).sum().to_frame().T
+            #     sankeyfig9 = plot_lu_sankey(data=d9, lu_to_reclass=lu_cols_map, reclass_to_final=lu_premap)
+            #     st.plotly_chart(sankeyfig9, use_container_width=True,key='san9')
+
+
 
     else:
         target_cols = st.multiselect("Target domains",cf_cols,default=default_target_domains, max_selections=5)
