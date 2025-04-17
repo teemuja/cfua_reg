@@ -833,89 +833,108 @@ with ve2:
         else:
             st.stop()
 
-
-        def plot_partial_corr(df_in, alpha=0.06):
-            results_df = df_in.copy()
-            results_df = results_df.reset_index()
-
-            # Add opacity columns based on significance
-            results_df["partial_opacity"] = np.where(results_df["Spearman_p"] < alpha, 1, 0.1)
-            results_df["beta_text_color"] = np.where(results_df["Pearson_p"] < alpha, "black", "lightgrey")
-
-            # Create subplots for facets based on 'R' column (R1 and R5)
-            fig = make_subplots(
-                rows=1, 
-                cols=2, 
-                shared_yaxes=True,
-                subplot_titles=["Radius 1km", "Radius 5km"],
-                column_widths=[0.5, 0.5]
-            )
-
-            # Loop cf domains..
-            cf_domains = results_df['Domain'].unique().tolist()
-            # Define colors
-            partial_colors = {"cf_Vehicle footprint":"skyblue",
-                            "cf_Goods and services footprint":"orange",
-                            "cf_Leisure travel footprint":"red"}
-
-            domain_offsets = np.linspace(-0.3, 0.3, len(cf_domains))  # Spread offsets evenly around center
-
-            # Loop through each domain and R value
-            for dom_idx, dom in enumerate(cf_domains):
-                results_df_dom = results_df[results_df['Domain'] == dom]
-                partial_color = partial_colors.get(dom, 'grey')
-
-                for idx, r_value in enumerate(["R1", "R5"], start=1):
-                    filtered_data = results_df_dom[results_df_dom["R"] == r_value]
-
-                    if not filtered_data.empty:
-                        
-                        # Add bar trace for each domain
-                        fig.add_trace(go.Bar(
-                            x=filtered_data['Land-use'],
-                            y=filtered_data['Spearman_r'],
-                            name=f"{dom} ({r_value})",
-                            marker=dict(color=partial_color, opacity=filtered_data["partial_opacity"]),
-                        ), row=1, col=idx)
-
-                        # Annotate each bar with the corresponding pearson value
-                        for var, y_val, color in zip(
-                            filtered_data['Land-use'], 
-                            filtered_data['Pearson_r'],
-                            filtered_data['beta_text_color']
-                        ):
-                            fig.add_annotation(
-                                x=var,
-                                y=y_val + (0.05 * np.sign(y_val)),  # Vertical offset
-                                text=f"{y_val:.2f}",
-                                showarrow=False,
-                                row=1,
-                                col=idx,
-                                font=dict(color=color, size=12),
-                                yanchor="bottom" if y_val >= 0 else "top",
-                                xref=f"x{idx}",  # Ensure correct x-axis per subplot
-                                xshift=domain_offsets[dom_idx] * 100  # Horizontal shift as a percentage
-                            )
-                    else:
-                        st.warning('Error')
-
+        @st.cache_data()
+        def plot_partial_corr(df_in, r_value="R1", alpha=0.06):
+            results_df = df_in.copy().reset_index()
             my_order = ['Urban','Facilities','Recreation','Suburban','Exurban','Green']
+            
+            # Convert Land-use to categorical with specified order
+            results_df['Land-use'] = pd.Categorical(
+                results_df['Land-use'], 
+                categories=my_order, 
+                ordered=True
+            )
+            
+            # Create single plot with secondary y-axis
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+            # Color mapping - same for bars and lines
+            domain_colors = {
+                "cf_Vehicle footprint": "skyblue",
+                "cf_Goods and services footprint": "orange",
+                "cf_Leisure travel footprint": "red",
+                "cf_Total footprint": "grey"
+            }
+
+            for dom in results_df['Domain'].unique():
+                # Filter and sort data
+                df = results_df[(results_df['Domain'] == dom) & (results_df['R'] == r_value)]
+                df = df.sort_values('Land-use')
+                
+                domain_color = domain_colors[dom]
+                spearman_significant = df['Spearman_p'] < alpha
+                pearson_significant = df['Pearson_p'] < alpha
+                
+                display_name = dom[3:] if dom.startswith("cf_") else dom
+
+                # Spearman bars (primary y-axis)
+                fig.add_trace(go.Bar(
+                    x=df['Land-use'],
+                    y=df['Spearman_r'],
+                    name=display_name,
+                    marker_color=domain_color,
+                    marker_opacity=np.where(spearman_significant, 1, 0.25).tolist(),
+                    legendgroup=dom
+                ), secondary_y=False)
+
+                # Pearson line (secondary y-axis)
+                fig.add_trace(go.Scatter(
+                    x=df['Land-use'],
+                    y=df['Pearson_r'],
+                    mode='lines+markers',
+                    line=dict(
+                        color=domain_color,
+                        width=1,
+                        dash='dash'
+                    ),
+                    opacity=np.where(pearson_significant.any(), 1, 0.25).item(),  # Move opacity to trace level
+                    marker=dict(
+                        color=np.where(pearson_significant, domain_color, 'lightgrey'),
+                        opacity=np.where(pearson_significant, 1, 0.25),
+                        size=8,
+                        line=dict(width=1, color='black')
+                    ),
+                    name=f"{dom} (Pearson)",
+                    showlegend=False,
+                    legendgroup=f"{dom}_pearson"
+                ), secondary_y=True)
+
+            # Update layout
             fig.update_layout(
-                xaxis=dict(categoryorder="array", categoryarray=my_order),
-                xaxis2=dict(categoryorder="array", categoryarray=my_order),
-                title=f"Partial correlations (greyed if insignificant)",
-                barmode="group",
-                xaxis_title=None,
-                yaxis_title="Correlation",
+                barmode='group',
                 height=500,
-                yaxis=dict(range=[-0.5, 0.5]),
-                yaxis2=dict(range=[-0.5, 0.5]),
-                showlegend=True
+                title=f"Partial correlations (Radius {r_value[1:]}km)",
+                legend=dict(orientation="h", y=1.1),
+                xaxis=dict(
+                    title="Land-use type",
+                    type='category',
+                    categoryorder='array',
+                    categoryarray=my_order,
+                    tickmode='array',
+                    tickvals=my_order
+                ),
+                yaxis=dict(
+                    title="Spearman r",
+                    range=[-0.5, 0.5]
+                ),
+                yaxis2=dict(
+                    title="Pearson r",
+                    range=[-0.5, 0.5],
+                    overlaying="y",
+                    side="right"
+                )
             )
 
             return fig
+
         
         #st.data_editor(partial_df_all)
         #st.stop()
-        fig_partial = plot_partial_corr(df_in=partial_df_all, alpha=0.06)
-        st.plotly_chart(fig_partial,use_container_width=True)
+
+        p1,p2 = st.columns(2)
+
+        fig_partial_1km = plot_partial_corr(df_in=partial_df_all, r_value="R1", alpha=0.06)
+        p1.plotly_chart(fig_partial_1km,use_container_width=True)
+        
+        fig_partial_5km = plot_partial_corr(df_in=partial_df_all, r_value="R5", alpha=0.06)
+        p2.plotly_chart(fig_partial_5km,use_container_width=True)
