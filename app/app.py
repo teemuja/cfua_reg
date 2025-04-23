@@ -851,9 +851,9 @@ with ve2:
 
                 # Color mapping - same for bars and lines
                 domain_colors = {
-                    "cf_Vehicle footprint": "skyblue",
-                    "cf_Goods and services footprint": "orange",
-                    "cf_Leisure travel footprint": "red",
+                    "cf_Vehicle footprint": "#468FAF",  # Sky Blue (Sky)
+                    "cf_Goods and services footprint": "#FFD700",  # Golden Yellow (Sun)
+                    "cf_Leisure travel footprint": "#E97451", #Burnt Sienna (Earth)
                     "cf_Total footprint": "grey"
                 }
 
@@ -915,11 +915,11 @@ with ve2:
                         tickvals=my_order
                     ),
                     yaxis=dict(
-                        title="Spearman r",
+                        title="Spearman r (bars)",
                         range=[-0.5, 0.5]
                     ),
                     yaxis2=dict(
-                        title="Pearson r",
+                        title="Pearson r (lines)",
                         range=[-0.5, 0.5],
                         overlaying="y",
                         side="right"
@@ -932,10 +932,10 @@ with ve2:
             #st.data_editor(partial_df_all)
             #st.stop()
 
-            p1,p2 = st.columns(2)
+            #p1,p2 = st.columns(2)
 
             fig_partial_1km = plot_partial_corr(df_in=partial_df_all, r_value="R1", alpha=0.06)
-            p1.plotly_chart(fig_partial_1km,use_container_width=True)
+            st.plotly_chart(fig_partial_1km,use_container_width=True)
             
             fig_partial_5km = plot_partial_corr(df_in=partial_df_all, r_value="R5", alpha=0.06)
-            p2.plotly_chart(fig_partial_5km,use_container_width=True)
+            st.plotly_chart(fig_partial_5km,use_container_width=True)
