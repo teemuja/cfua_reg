@@ -183,9 +183,22 @@ with st.expander('Case cities & Clusters', expanded=False):
             cols_map = {col: col.removeprefix('cf_') for col in cf_cols if col not in ['cf_Total footprint unit']}
             cols = list(cols_map.values())
             df.rename(columns=cols_map, inplace=True)
+
+            # compute N values
+            df_counts = df.groupby(city).size().rename("N").reset_index()
+
+            # Group means
             df_grouped = df.groupby(city)[cols].mean().reset_index()
+
+            # Merge in N
+            df_grouped = df_grouped.merge(df_counts, on=city, how='left')
+
+            # Create city labels with N underneath
+            df_grouped["city_label"] = df_grouped[city] + "<br><span style='font-size:10px'>N=" + df_grouped["N"].astype(str) + "</span>"
+
             cf_cols_filt = [col for col in cols if col != 'Total footprint']
-            df_melted = df_grouped.melt(id_vars='fua_name', value_vars=cf_cols_filt, 
+
+            df_melted = df_grouped.melt(id_vars='city_label', value_vars=cf_cols_filt, 
                                         var_name='Carbon Footprint Type', value_name='Value')
             
             earthy_sky_colors = [
@@ -210,11 +223,11 @@ with st.expander('Case cities & Clusters', expanded=False):
             ]
             fig = px.bar(
                 df_melted,
-                x=city,
+                x="city_label",
                 y='Value',
                 color='Carbon Footprint Type',
                 title="Carbon Footprint Breakdown by City",
-                labels={'Value': 'Carbon Footprint','fua_name':'City'},
+                labels={'Value': 'Carbon Footprint','city_label':'City'},
                 category_orders={'Carbon Footprint Type': myorder},
                 color_discrete_sequence=earthy_sky_colors
                 # px.colors.qualitative.Vivid
@@ -235,9 +248,18 @@ with st.expander('Case cities & Clusters', expanded=False):
             # Make sure bars are stacked and ordered by total descending
             fig.update_layout(barmode='stack', xaxis={'categoryorder': 'total descending'})
 
-            return fig
+            return fig, df_melted
         
-        st.plotly_chart(country_plot(df_in=datac[datac['R'] == 'R1'],cf_cols=cf_cols,city='fua_name'), use_container_width=True)
+        coutry_fig, df_melted = country_plot(df_in=datac[datac['R'] == 'R1'],cf_cols=cf_cols,city='fua_name')
+        
+        st.plotly_chart(coutry_fig, use_container_width=True)
+
+        df_melted_enh = df_melted.copy()
+        df_melted_enh['city_label'] = df_melted_enh['city_label'].str.replace("<br><span style='font-size:10px'>N="," (N=").str.replace("</span>",")")
+        df_melted_enh['share_within_city_%'] = round(df_melted_enh['Value']/df_melted_enh.groupby('city_label')['Value'].transform('sum') * 100, 2)
+
+        st.markdown("**Carbon footprint shares within case cities (%)**")
+        st.data_editor(df_melted_enh,key="df_melted_editor",height=300)
 
         #check only with one radius data
         yks,viis,ysi = st.tabs(['1km','5km','9km'])
