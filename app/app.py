@@ -33,31 +33,158 @@ st.subheader("Climate Friendly Urban Architecture")
 st.markdown("###")
 
 
-def add_plot_download_buttons(fig, filename_base, label_base, key_prefix):
-    col1, col2 = st.columns(2)
+def add_plot_download_buttons(fig, filename_base, label_base, key_prefix, legend_override=None, margin_override=None):
+    export_presets = {
+        "16:9 Slide": {
+            "width": 3200,
+            "height": 1800,
+            "text_scale": 3.0,
+            "marker_scale": 2.5,
+            "title_standoff": 30,
+            "xaxis_title_standoff": 40,
+            "yaxis_title_standoff": 80,
+            "legend_y": 0.98,
+            "margin_t": 220,
+            "margin_b": 160,
+            "margin_l": 280,
+        },
+        "A4 Portrait": {
+            "width": 2480,
+            "height": 3508,
+            "text_scale": 3.2,
+            "marker_scale": 2.5,
+            "title_standoff": 34,
+            "xaxis_title_standoff": 46,
+            "yaxis_title_standoff": 140,
+            "legend_y": 0.95,
+            "margin_t": 260,
+            "margin_b": 200,
+            "margin_l": 300,
+        },
+        "A4 Landscape": {
+            "width": 3508,
+            "height": 2480,
+            "text_scale": 3.0,
+            "marker_scale": 2.5,
+            "title_standoff": 32,
+            "xaxis_title_standoff": 42,
+            "yaxis_title_standoff": 130,
+            "legend_y": 0.96,
+            "margin_t": 240,
+            "margin_b": 180,
+            "margin_l": 290,
+        },
+        "Poster": {
+            "width": 5000,
+            "height": 3000,
+            "text_scale": 3.6,
+            "marker_scale": 2.8,
+            "title_standoff": 40,
+            "xaxis_title_standoff": 54,
+            "yaxis_title_standoff": 160,
+            "legend_y": 0.94,
+            "margin_t": 300,
+            "margin_b": 220,
+            "margin_l": 340,
+        },
+    }
+
+    selected_preset = st.selectbox(
+        f"Export preset for {label_base}",
+        options=list(export_presets.keys()),
+        index=0,
+        key=f"{key_prefix}_preset",
+    )
+    preset = export_presets[selected_preset]
+
+    def _export_ready_figure(fig_in, preset_cfg):
+        fig_out = go.Figure(fig_in)
+        text_scale = preset_cfg["text_scale"]
+
+        base_font_size = fig_out.layout.font.size if fig_out.layout.font and fig_out.layout.font.size else 12
+        legend_cfg = dict(
+            font=dict(size=max(12, int(12 * text_scale))),
+            y=preset_cfg["legend_y"],
+            yanchor="top",
+            x=0.02,
+            xanchor="left",
+        )
+        if legend_override:
+            legend_cfg.update(legend_override)
+
+        margin_cfg = dict(
+            t=preset_cfg["margin_t"],
+            b=preset_cfg["margin_b"],
+            l=preset_cfg["margin_l"],
+        )
+        if margin_override:
+            margin_cfg.update(margin_override)
+
+        fig_out.update_layout(
+            font=dict(size=max(12, int(base_font_size * text_scale))),
+            legend=legend_cfg,
+            margin=margin_cfg,
+        )
+
+        if fig_out.layout.title and fig_out.layout.title.text:
+            title_size = fig_out.layout.title.font.size if fig_out.layout.title.font and fig_out.layout.title.font.size else 18
+            fig_out.update_layout(
+                title=dict(
+                    font=dict(size=max(18, int(title_size * text_scale))),
+                    y=0.99,
+                    yanchor="top",
+                    pad=dict(t=preset_cfg["title_standoff"]),
+                )
+            )
+
+        fig_out.update_xaxes(
+            tickfont=dict(size=max(12, int(11 * text_scale))),
+            title_font=dict(size=max(14, int(13 * text_scale))),
+            title_standoff=preset_cfg["xaxis_title_standoff"],
+        )
+        fig_out.update_yaxes(
+            tickfont=dict(size=max(12, int(11 * text_scale))),
+            title_font=dict(size=max(14, int(13 * text_scale))),
+            title_standoff=preset_cfg["yaxis_title_standoff"],
+        )
+
+        # Scale scatter markers only (not bar charts)
+        for trace in fig_out.data:
+            trace_type = getattr(trace, "type", None)
+            if trace_type == "scatter" and hasattr(trace, "marker") and trace.marker:
+                marker_size = getattr(trace.marker, "size", None) or 8
+                trace.marker.size = max(8, int(marker_size * preset_cfg["marker_scale"]))
+
+        if fig_out.layout.annotations:
+            for ann in fig_out.layout.annotations:
+                ann_size = ann.font.size if ann.font and ann.font.size else 12
+                ann.font = dict(size=max(12, int(ann_size * text_scale)))
+
+        return fig_out
+
+    fig_export = _export_ready_figure(fig, preset)
+
+    col1 = st.columns(1)[0]
     try:
-        png_bytes = fig.to_image(format="png", width=3200, height=1800, scale=2)
-        svg_bytes = fig.to_image(format="svg")
+        png_bytes = fig_export.to_image(
+            format="png",
+            width=preset["width"],
+            height=preset["height"],
+            scale=1,
+        )
 
         col1.download_button(
             label=f"Download {label_base} (PNG, high-res)",
             data=BytesIO(png_bytes).getvalue(),
-            file_name=f"{filename_base}_3200x1800.png",
+            file_name=f"{filename_base}_{preset['width']}x{preset['height']}.png",
             mime="image/png",
             key=f"{key_prefix}_png",
-        )
-        col2.download_button(
-            label=f"Download {label_base} (SVG)",
-            data=svg_bytes,
-            file_name=f"{filename_base}.svg",
-            mime="image/svg+xml",
-            key=f"{key_prefix}_svg",
         )
     except Exception as e:
         st.info(f"High-resolution static export unavailable ({e}).")
         st.download_button(
             label=f"Download {label_base} (HTML interactive)",
-            data=fig.to_html(full_html=True, include_plotlyjs="cdn").encode("utf-8"),
+            data=fig_export.to_html(full_html=True, include_plotlyjs="cdn").encode("utf-8"),
             file_name=f"{filename_base}.html",
             mime="text/html",
             key=f"{key_prefix}_html",
@@ -294,6 +421,14 @@ with st.expander('Case cities & Clusters', expanded=False):
             filename_base="cfua_city_carbon_breakdown_R1",
             label_base="city chart",
             key_prefix="country_r1",
+            legend_override=dict(
+                orientation="h",
+                x=0.0,
+                xanchor="left",
+                y=-0.28,
+                yanchor="top",
+            ),
+            margin_override=dict(b=420),
         )
 
         df_melted_enh = df_melted.copy()
@@ -967,7 +1102,6 @@ with ve2:
                         marker=dict(
                             color=np.where(pearson_significant, domain_color, 'lightgrey'),
                             opacity=np.where(pearson_significant, 1, 0.25),
-                            size=8,
                             line=dict(width=1, color='black')
                         ),
                         name=f"{dom} (Pearson)",

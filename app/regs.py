@@ -455,9 +455,9 @@ def interaction_scan(df, target_col, predictors):
     results = []
 
     df = df.copy()
-    df[f'log_{target_col}'] = np.log1p(df[target_col])
-    for col in predictors:
-        df[f'log_{col}'] = np.log1p(df[col])
+    cols_needed = [target_col, *predictors]
+    for col in cols_needed:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
 
     # build combinations
     interaction_terms = []
@@ -467,8 +467,16 @@ def interaction_scan(df, target_col, predictors):
         interaction_terms.append(new_col)
 
     all_predictors = predictors + interaction_terms
-    X = df[all_predictors]
-    y = df[target_col]
+    X = df[all_predictors].apply(pd.to_numeric, errors='coerce')
+    y = pd.to_numeric(df[target_col], errors='coerce')
+
+    valid_mask = np.isfinite(y.to_numpy())
+    valid_mask &= np.isfinite(X.to_numpy()).all(axis=1)
+    X = X.loc[valid_mask]
+    y = y.loc[valid_mask]
+
+    if len(X) < 3:
+        return pd.DataFrame(columns=['names'])
 
     results = pg.linear_regression(X, y)
 
