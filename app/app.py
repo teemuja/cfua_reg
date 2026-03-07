@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from io import BytesIO
 import duckdb
 import plotly.express as px
 import plotly.graph_objs as go
@@ -30,6 +31,37 @@ button[title="View fullscreen"]{
 st.header("CFUA",divider="red")
 st.subheader("Climate Friendly Urban Architecture")
 st.markdown("###")
+
+
+def add_plot_download_buttons(fig, filename_base, label_base, key_prefix):
+    col1, col2 = st.columns(2)
+    try:
+        png_bytes = fig.to_image(format="png", width=3200, height=1800, scale=2)
+        svg_bytes = fig.to_image(format="svg")
+
+        col1.download_button(
+            label=f"Download {label_base} (PNG, high-res)",
+            data=BytesIO(png_bytes).getvalue(),
+            file_name=f"{filename_base}_3200x1800.png",
+            mime="image/png",
+            key=f"{key_prefix}_png",
+        )
+        col2.download_button(
+            label=f"Download {label_base} (SVG)",
+            data=svg_bytes,
+            file_name=f"{filename_base}.svg",
+            mime="image/svg+xml",
+            key=f"{key_prefix}_svg",
+        )
+    except Exception as e:
+        st.info(f"High-resolution static export unavailable ({e}).")
+        st.download_button(
+            label=f"Download {label_base} (HTML interactive)",
+            data=fig.to_html(full_html=True, include_plotlyjs="cdn").encode("utf-8"),
+            file_name=f"{filename_base}.html",
+            mime="text/html",
+            key=f"{key_prefix}_html",
+        )
 
 def check_password():
     def password_entered():
@@ -133,7 +165,7 @@ with st.status('Connecting database..') as dbstatus:
         }
     
     temp_df = data.rename(columns=lu_cols_map)
-    summed_cols = temp_df.groupby(axis=1, level=0).sum()
+    summed_cols = temp_df.T.groupby(level=0).sum().T
     for new_col in summed_cols.columns:
         data[new_col] = summed_cols[new_col]
     del temp_df
@@ -171,8 +203,9 @@ with st.expander('Case cities & Clusters', expanded=False):
         agg_cols_mode = feat_cols + cat_cols
 
         if cluster != 'None':
+            cluster_reso = int(cluster)
             datac = clusterize(df_in=datac, agg_cols_mean=agg_cols_mean, agg_cols_mode=agg_cols_mode,
-                            toreso=cluster, min_cluster_size=min_cluster_size)
+                            toreso=cluster_reso, min_cluster_size=min_cluster_size)
 
         col_order = ['h3_id'] + feat_cols + cat_cols + non_cat_base_cols + cf_cols + lu_cols_in_use
         datac = datac[col_order]
@@ -234,15 +267,18 @@ with st.expander('Case cities & Clusters', expanded=False):
                 # https://plotly.com/python/discrete-color/
             )
 
-            for i, row in df_grouped.iterrows():
-                row['Total footprint'] = round(row['Total footprint']/1000,1)
+            offset = df_melted['Value'].max() * 0.02
+            for _, row in df_grouped.iterrows():
+                stack_height = row[cf_cols_filt].sum()
+                total_tco2e = round(row['Total footprint'] / 1000, 1)
                 fig.add_annotation(
-                    x=row[city],
-                    y=50 * row['Total footprint'],
-                    text=f"{row['Total footprint']} tCO2e", #:.2f
+                    x=row['city_label'],
+                    y=stack_height + offset,
+                    text=f"{total_tco2e} tCO2e",
                     showarrow=False,
                     font=dict(size=12, color='black'),
-                    yshift=5
+                    xanchor='center',
+                    yanchor='bottom'
                 )
 
             # Make sure bars are stacked and ordered by total descending
@@ -253,10 +289,18 @@ with st.expander('Case cities & Clusters', expanded=False):
         coutry_fig, df_melted = country_plot(df_in=datac[datac['R'] == 'R1'],cf_cols=cf_cols,city='fua_name')
         
         st.plotly_chart(coutry_fig, use_container_width=True)
+        add_plot_download_buttons(
+            fig=coutry_fig,
+            filename_base="cfua_city_carbon_breakdown_R1",
+            label_base="city chart",
+            key_prefix="country_r1",
+        )
 
         df_melted_enh = df_melted.copy()
         df_melted_enh['city_label'] = df_melted_enh['city_label'].str.replace("<br><span style='font-size:10px'>N="," (N=").str.replace("</span>",")")
-        df_melted_enh['share_within_city_%'] = round(df_melted_enh['Value']/df_melted_enh.groupby('city_label')['Value'].transform('sum') * 100, 2)
+        df_melted_enh['Value'] = pd.to_numeric(df_melted_enh['Value'], errors='coerce')
+        city_totals = df_melted_enh.groupby('city_label')['Value'].transform('sum')
+        df_melted_enh['share_within_city_%'] = ((df_melted_enh['Value'] / city_totals) * 100).round(2)
 
         st.markdown("**Carbon footprint shares within case cities (%)**")
         st.data_editor(df_melted_enh,key="df_melted_editor",height=300)
@@ -412,7 +456,14 @@ with ve1:
             for radius in [1,5,9]:
                 df_r = data1[data1['R'] == f"R{radius}"]
                 for col in lu_cols + cf_cols:
-                    df_r[col], lam = yeojohnson(df_r[col])
+                    col_numeric = pd.to_numeric(df_r[col], errors='coerce')
+                    finite_mask = np.isfinite(col_numeric.to_numpy())
+
+                    if finite_mask.sum() > 1:
+                        transformed, _ = yeojohnson(col_numeric[finite_mask])
+                        col_out = col_numeric.copy()
+                        col_out.loc[finite_mask] = transformed
+                        df_r[col] = col_out
                 data1.loc[data1['R'] == f"R{radius}", lu_cols] = df_r[lu_cols]
                 data1.loc[data1['R'] == f"R{radius}", cf_cols] = df_r[cf_cols]
 
@@ -511,7 +562,9 @@ with ve1:
         st.stop()
     ## ------- reg tables ---------
     with st.expander(f'Regression tables', expanded=False):
-        
+        reg_df1 = pd.DataFrame()
+        reg_df5 = pd.DataFrame()
+        reg_df9 = pd.DataFrame()
 
         if len(target_cols) >= 1:
 
@@ -530,35 +583,35 @@ with ve1:
                                         )
                 if use_predefined:
                     reg_df1.rename(index=lu_premap, inplace=True)
-                st.data_editor(reg_df1.drop(columns='Radius'),use_container_width=True, height=500,key=yksi)
-        
-        with viisi:
-            df_r5 = data1[data1['R'] == f"R5"]
-            r5_lu_cols = [col for col in df_r5.columns if col.startswith('lu')]
-            reg_df5 = gen_reg_table_multitarget(data=df_r5.fillna(0),
-                                        target_cf_cols=target_cols,
-                                        base_cols=base_cols_orig + control_cols,
-                                        cat_cols=cat_cols,
-                                        ext_cols=r5_lu_cols,
-                                        control_cols=control_cols
-                                        )
-            if use_predefined:
-                reg_df5.rename(index=lu_premap, inplace=True)
-            st.data_editor(reg_df5.drop(columns='Radius'),use_container_width=True, height=500,key=viisi)
+                st.data_editor(reg_df1.drop(columns='Radius'),use_container_width=True, height=500,key='regtable_r1')
+            
+            with viisi:
+                df_r5 = data1[data1['R'] == f"R5"]
+                r5_lu_cols = [col for col in df_r5.columns if col.startswith('lu')]
+                reg_df5 = gen_reg_table_multitarget(data=df_r5.fillna(0),
+                                            target_cf_cols=target_cols,
+                                            base_cols=base_cols_orig + control_cols,
+                                            cat_cols=cat_cols,
+                                            ext_cols=r5_lu_cols,
+                                            control_cols=control_cols
+                                            )
+                if use_predefined:
+                    reg_df5.rename(index=lu_premap, inplace=True)
+                st.data_editor(reg_df5.drop(columns='Radius'),use_container_width=True, height=500,key='regtable_r5')
 
-        with yhdeksan:
-            df_r9 = data1[data1['R'] == f"R9"]
-            r9_lu_cols = [col for col in df_r9.columns if col.startswith('lu')]
-            reg_df9 = gen_reg_table_multitarget(data=df_r9.fillna(0),
-                                        target_cf_cols=target_cols,
-                                        base_cols=base_cols_orig + control_cols,
-                                        cat_cols=cat_cols,
-                                        ext_cols=r9_lu_cols,
-                                        control_cols=control_cols
-                                        )
-            if use_predefined:
-                reg_df9.rename(index=lu_premap, inplace=True)
-            st.data_editor(reg_df9.drop(columns='Radius'),use_container_width=True, height=500,key=yhdeksan)
+            with yhdeksan:
+                df_r9 = data1[data1['R'] == f"R9"]
+                r9_lu_cols = [col for col in df_r9.columns if col.startswith('lu')]
+                reg_df9 = gen_reg_table_multitarget(data=df_r9.fillna(0),
+                                            target_cf_cols=target_cols,
+                                            base_cols=base_cols_orig + control_cols,
+                                            cat_cols=cat_cols,
+                                            ext_cols=r9_lu_cols,
+                                            control_cols=control_cols
+                                            )
+                if use_predefined:
+                    reg_df9.rename(index=lu_premap, inplace=True)
+                st.data_editor(reg_df9.drop(columns='Radius'),use_container_width=True, height=500,key='regtable_r9')
 
 
     with st.expander(f'Regression plots', expanded=False):
@@ -958,6 +1011,19 @@ with ve2:
 
             fig_partial_1km = plot_partial_corr(df_in=partial_df_all, r_value="R1", alpha=0.06)
             st.plotly_chart(fig_partial_1km,use_container_width=True)
+            target_slug = target_col.replace(' ', '_')
+            add_plot_download_buttons(
+                fig=fig_partial_1km,
+                filename_base=f"partial_corr_{target_slug}_R1",
+                label_base="1km plot",
+                key_prefix=f"partial_r1_{target_slug}",
+            )
             
             fig_partial_5km = plot_partial_corr(df_in=partial_df_all, r_value="R5", alpha=0.06)
             st.plotly_chart(fig_partial_5km,use_container_width=True)
+            add_plot_download_buttons(
+                fig=fig_partial_5km,
+                filename_base=f"partial_corr_{target_slug}_R5",
+                label_base="5km plot",
+                key_prefix=f"partial_r5_{target_slug}",
+            )

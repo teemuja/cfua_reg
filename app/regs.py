@@ -264,19 +264,52 @@ def partial_corr_table_v2(df, predictor_cols, target_col, covar_cols=None, delta
 def partial_corr_table_v3(df, predictor_cols, target_col, covar_cols=None):
     
     df = df.copy()
+    covar_cols = covar_cols or []
+    covar_cols = [col for col in covar_cols if col in df.columns]
 
-    #log muunnos
+    def to_numeric_or_codes(series):
+        numeric = pd.to_numeric(series, errors='coerce')
+        if numeric.notna().sum() > 0:
+            return numeric
+        codes, _ = pd.factorize(series, sort=True)
+        coded = pd.Series(codes, index=series.index, dtype='float64')
+        coded[coded < 0] = np.nan
+        return coded
+
+    for covar in covar_cols:
+        df[covar] = to_numeric_or_codes(df[covar])
+
+    # ensure numeric + safe log transform for target
+    df[target_col] = to_numeric_or_codes(df[target_col])
+    df.loc[df[target_col] <= 0, target_col] = np.nan
     df[target_col] = np.log(df[target_col])
             
     results = []
 
     for col in predictor_cols:
-        #replace 0 with 1 to apply log..
-        df.loc[df[col] == 0, col] = 1
-        df[col] = np.log(df[col])
+        # coerce to numeric and replace non-positive with 1 before log
+        predictor = to_numeric_or_codes(df[col])
+        predictor[predictor <= 0] = 1
+        predictor = np.log(predictor)
 
-        pearson = pg.partial_corr(data=df, x=col, y=target_col, covar=covar_cols, method='pearson')
-        spearman = pg.partial_corr(data=df, x=col, y=target_col, covar=covar_cols, method='spearman')
+        work_df = df[[target_col] + covar_cols].copy()
+        work_df[col] = predictor
+
+        if work_df[col].notna().sum() < 3 or work_df[target_col].notna().sum() < 3:
+            results.append({
+                'Variable': col,
+                'N': 0,
+                'Pearson_r': np.nan,
+                'Pearson_p': np.nan,
+                'Pearson_CI95%': np.nan,
+                'Spearman_r': np.nan,
+                'Spearman_p': np.nan,
+                'Spearman_CI95%': np.nan
+            })
+            continue
+
+        pearson = pg.partial_corr(data=work_df, x=col, y=target_col, covar=covar_cols, method='pearson')
+        spearman = pg.partial_corr(data=work_df, x=col, y=target_col, covar=covar_cols, method='spearman')
         beta = pearson['r'].values[0]
 
         results.append({
